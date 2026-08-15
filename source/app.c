@@ -523,6 +523,11 @@ static int tap_row_index(int y0, int row_h, int gap) {
     return idx;
 }
 
+/* API Key 子菜单 */
+static int g_key_menu_open = 0;
+static int g_key_menu_idx = 0;
+static char g_key_menu_msg[256];
+
 /* ---------- 设置界面 ---------- */
 
 #define SET_COUNT 7
@@ -574,9 +579,144 @@ static void set_edit_field(char **field, const char *label, int zh, int password
     }
 }
 
+/* ---------- API Key 子菜单 ---------- */
+
+#define KEY_MENU_ROWS 3
+
+static void key_menu_input(u64 kDown) {
+    if (kDown & HidNpadButton_Plus) {
+        g_want_exit = 1;
+        return;
+    }
+    if (kDown & HidNpadButton_B) {
+        g_key_menu_open = 0;
+        g_dirty = 1;
+        return;
+    }
+    if (kDown & HidNpadButton_Down) {
+        if (g_key_menu_idx < KEY_MENU_ROWS - 1) g_key_menu_idx++;
+        g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_Up) {
+        if (g_key_menu_idx > 0) g_key_menu_idx--;
+        g_dirty = 1;
+    }
+    int tidx = tap_row_index(HEADER_H + 150, 64, 8);
+    if (tidx >= 0 && tidx < KEY_MENU_ROWS) {
+        g_key_menu_idx = tidx;
+        kDown |= HidNpadButton_A;
+    }
+    if (!(kDown & HidNpadButton_A)) return;
+
+    switch (g_key_menu_idx) {
+        case 0: {
+            char msg[256];
+            if (config_reload_key(&g_cfg, msg, sizeof(msg)) == 1)
+                snprintf(g_key_menu_msg, sizeof(g_key_menu_msg), "已从 key.txt 加载 Key ✓");
+            else
+                snprintf(g_key_menu_msg, sizeof(g_key_menu_msg), "%s", msg);
+            break;
+        }
+        case 1:
+            set_edit_field(&g_cfg.deepseek_api_key, "API Key(手动输入,密码式)", 0, 1);
+            snprintf(g_key_menu_msg, sizeof(g_key_menu_msg),
+                     "已更新(离开设置时同步写回 key.txt)");
+            break;
+        case 2:
+            free(g_cfg.deepseek_api_key);
+            g_cfg.deepseek_api_key = strdup("");
+            snprintf(g_key_menu_msg, sizeof(g_key_menu_msg), "已清空 Key");
+            break;
+    }
+    g_dirty = 1;
+}
+
+static void render_key_menu(void) {
+    SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
+    SDL_RenderClear(g_ren);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+    SDL_Rect hdr = { 0, 0, WIN_W, HEADER_H };
+    SDL_RenderFillRect(g_ren, &hdr);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+    SDL_Rect hair = { 0, HEADER_H - 1, WIN_W, 1 };
+    SDL_RenderFillRect(g_ren, &hair);
+
+    SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, "API Key 设置", COL_TEXT);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, (HEADER_H - ts->h) / 2, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+
+    char status[160];
+    snprintf(status, sizeof(status), "当前:%s",
+             (g_cfg.deepseek_api_key && g_cfg.deepseek_api_key[0]) ? "已设置" : "未设置");
+    ts = TTF_RenderUTF8_Blended(g_font, status,
+                                (g_cfg.deepseek_api_key && g_cfg.deepseek_api_key[0])
+                                    ? COL_GREEN : COL_TEXT3);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 60, HEADER_H + 24, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+
+    const char *rows[KEY_MENU_ROWS] = {
+        "从 key.txt 读取(推荐,免手输)",
+        "手动输入(软键盘,密码式)",
+        "清空 Key",
+    };
+    int y = HEADER_H + 150;
+    for (int i = 0; i < KEY_MENU_ROWS; i++) {
+        SDL_Rect row = { 60, y, WIN_W - 120, 64 };
+        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                       (Sint16)(row.y + row.h), 10,
+                       i == g_key_menu_idx ? COL_SURF2.r : COL_SURF.r,
+                       i == g_key_menu_idx ? COL_SURF2.g : COL_SURF.g,
+                       i == g_key_menu_idx ? COL_SURF2.b : COL_SURF.b, 255);
+        ts = TTF_RenderUTF8_Blended(g_font, rows[i], i == 0 ? COL_BRAND : COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + (row.h - ts->h) / 2, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        y += 72;
+    }
+
+    if (g_key_menu_msg[0]) {
+        ts = TTF_RenderUTF8_Blended(g_font_hint, g_key_menu_msg, COL_TEXT2);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 8, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+    }
+
+    const char *hint = "↑↓/点击 选择    A 执行    B 返回设置    + 退出";
+    ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, WIN_H - 48, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+}
+
 static void settings_input(u64 kDown) {
     if (kDown & HidNpadButton_Plus) {
         g_want_exit = 1;
+        return;
+    }
+    if (g_key_menu_open) {
+        key_menu_input(kDown);
         return;
     }
     /* 触摸:点行 = 选中并触发 */
@@ -614,7 +754,11 @@ static void settings_input(u64 kDown) {
                 break;
             case 1: set_edit_field(&g_cfg.harness_base_url, "Harness 地址(指向 dsh-bridge)", 0, 0); break;
             case 2: set_edit_field(&g_cfg.deepseek_base_url, "DeepSeek 地址", 0, 0); break;
-            case 3: set_edit_field(&g_cfg.deepseek_api_key, "API Key", 0, 1); break;
+            case 3:
+                g_key_menu_open = 1;
+                g_key_menu_idx = 0;
+                g_key_menu_msg[0] = '\0';
+                break;
             case 4: set_edit_field(&g_cfg.model, "模型(如 deepseek-v4-pro)", 0, 0); break;
             case 5:
                 free(g_cfg.deepseek_thinking);
@@ -628,6 +772,10 @@ static void settings_input(u64 kDown) {
 }
 
 static void render_settings(void) {
+    if (g_key_menu_open) {
+        render_key_menu();
+        return;
+    }
     SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
     SDL_RenderClear(g_ren);
 

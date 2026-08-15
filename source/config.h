@@ -14,4 +14,10 @@ void config_free(backend_config_t *cfg);
 /* 校验配置,错误描述写入 err(errsz 建议 >= 160);无错误时 err 为空串 */
 void config_check(const backend_config_t *cfg, char *err, size_t errsz);
 
+/*
+ * 从独立的 key.txt 重新加载 API Key 到 cfg(覆盖现有值)。
+ * 成功返回 1;文件不存在/为空返回 0,msg 写可展示提示。
+ */
+int config_reload_key(backend_config_t *cfg, char *msg, size_t msgsz);
+
 #endif /* SWITCH_DSH_CONFIG_H */

@@ -155,6 +155,20 @@ int config_save(const backend_config_t *cfg) {
     return 0;
 }
 
+int config_reload_key(backend_config_t *cfg, char *msg, size_t msgsz) {
+    char *keyfile = read_key_file();
+    if (!keyfile) {
+        if (msg && msgsz)
+            snprintf(msg, msgsz,
+                     "key.txt 不存在或为空\n(sdmc:/switch/switch-dsh-client/deepseek_api_key.txt)");
+        return 0;
+    }
+    free(cfg->deepseek_api_key);
+    cfg->deepseek_api_key = keyfile;
+    if (msg && msgsz) snprintf(msg, msgsz, "已加载");
+    return 1;
+}
+
 void config_check(const backend_config_t *cfg, char *err, size_t errsz) {
     if (errsz == 0) return;
     err[0] = '\0';
