@@ -153,7 +153,10 @@ static void add_msg(int role, const char *text, int done) {
     }
     msg_t *m = &g_msgs[g_nmsgs++];
     m->text = malloc(strlen(text) + 1);
-    if (m->text) strcpy(m->text, text);
+    if (m->text) {
+        strcpy(m->text, text);
+        utf8_sanitize(m->text); /* 剥离字体无法渲染的字符 */
+    }
     m->think = NULL;
     m->role = role;
     m->done = done;
@@ -544,7 +547,7 @@ static void render_chat(void) {
     if (g_nmsgs > 0 && g_msgs[g_nmsgs - 1].role == ROLE_ASSISTANT &&
         !g_msgs[g_nmsgs - 1].done) {
         ts = TTF_RenderUTF8_Blended(g_font_hint,
-                                    g_stream_think ? "● 思考中…" : "● 回复中…",
+                                    g_stream_think ? "思考中…" : "回复中…",
                                     COL_ACCENT);
         if (ts) {
             SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -680,7 +683,7 @@ static void key_menu_input(u64 kDown) {
         case 0: {
             char msg[256];
             if (config_reload_key(&g_cfg, msg, sizeof(msg)) == 1)
-                snprintf(g_key_menu_msg, sizeof(g_key_menu_msg), "已从 key.txt 加载 Key ✓");
+                snprintf(g_key_menu_msg, sizeof(g_key_menu_msg), "已从 key.txt 加载 Key");
             else
                 snprintf(g_key_menu_msg, sizeof(g_key_menu_msg), "%s", msg);
             break;
@@ -767,7 +770,7 @@ static void render_key_menu(void) {
         }
     }
 
-    const char *hint = "↑↓/点击 选择    A 执行    B 返回设置    + 退出";
+    const char *hint = "方向键/点击 选择    A 执行    B 返回设置    + 退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -894,7 +897,7 @@ static void render_settings(void) {
         }
     }
 
-    const char *hint = "↑↓ 选择    A 修改/切换    B 保存并返回    + 退出";
+    const char *hint = "方向键 选择    A 修改/切换    B 保存并返回    + 退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -1003,7 +1006,7 @@ static void render_choice(void) {
 
         /* 选中标记 */
         ts = TTF_RenderUTF8_Blended(g_font_title,
-                                    i == g_choice_idx ? "▶" : "  ", COL_BRAND);
+                                    i == g_choice_idx ? "> " : "  ", COL_BRAND);
         if (ts) {
             SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
             SDL_Rect d = { card.x + 28, card.y + 20, ts->w, ts->h };
@@ -1040,7 +1043,7 @@ static void render_choice(void) {
         }
     }
 
-    const char *hint = "↑↓/←→ 选择    A 确定    + 退出";
+    const char *hint = "方向键 选择    A 确定    + 退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -1264,7 +1267,7 @@ static void render_sessions(void) {
 
         /* 右侧:状态 + 时间 */
         char meta[64];
-        if (g_sessions[i].running) snprintf(meta, sizeof(meta), "● 运行中");
+        if (g_sessions[i].running) snprintf(meta, sizeof(meta), "运行中");
         else fmt_time(g_sessions[i].updated_at, meta, sizeof(meta));
         ts = TTF_RenderUTF8_Blended(g_font_hint, meta,
                                     g_sessions[i].running ? COL_GREEN : COL_TEXT3);
@@ -1280,7 +1283,7 @@ static void render_sessions(void) {
         if (y > WIN_H - 100) break; /* 一屏装不下就截断 */
     }
 
-    const char *hint = "↑↓ 选择    A 打开    B 返回    + 退出";
+    const char *hint = "方向键 选择    A 打开    B 返回    + 退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -1463,7 +1466,7 @@ static void render_workspaces(void) {
                        sel ? COL_SURF2.b : COL_SURF.b, 255);
 
         char label[200];
-        snprintf(label, sizeof(label), "📁 %s", g_wss[i].title);
+        snprintf(label, sizeof(label), "%s", g_wss[i].title);
         ts = TTF_RenderUTF8_Blended(g_font, label, COL_TEXT);
         if (ts) {
             SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -1507,7 +1510,7 @@ static void render_workspaces(void) {
         }
     }
 
-    const char *hint = "↑↓ 选择    A 打开/新建    B 返回    + 退出";
+    const char *hint = "方向键 选择    A 打开/新建    B 返回    + 退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -1650,7 +1653,7 @@ static void render_ws_sessions(void) {
 
     char hdr_title[200];
     if (g_ws_sel >= 0 && (size_t)g_ws_sel < g_wss_n)
-        snprintf(hdr_title, sizeof(hdr_title), "📁 %s", g_wss[g_ws_sel].title);
+        snprintf(hdr_title, sizeof(hdr_title), "%s", g_wss[g_ws_sel].title);
     else
         snprintf(hdr_title, sizeof(hdr_title), "工作区会话");
     SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, hdr_title, COL_TEXT);
@@ -1722,7 +1725,7 @@ static void render_ws_sessions(void) {
             SDL_FreeSurface(ts);
         }
         char meta[64];
-        if (g_wss_sessions[i].running) snprintf(meta, sizeof(meta), "● 运行中");
+        if (g_wss_sessions[i].running) snprintf(meta, sizeof(meta), "运行中");
         else fmt_time(g_wss_sessions[i].updated_at, meta, sizeof(meta));
         ts = TTF_RenderUTF8_Blended(g_font_hint, meta,
                                     g_wss_sessions[i].running ? COL_GREEN : COL_TEXT3);
@@ -1738,7 +1741,7 @@ static void render_ws_sessions(void) {
         if (y > WIN_H - 100) break;
     }
 
-    const char *hint = "↑↓ 选择    A 打开/新建    B 返回工作区    + 退出";
+    const char *hint = "方向键 选择    A 打开/新建    B 返回工作区    + 退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -1895,7 +1898,7 @@ static void render_models(void) {
 
         char label[200];
         snprintf(label, sizeof(label), "%s%s", g_models[i].name,
-                 strcmp(g_models[i].id, g_cur_model) == 0 ? "  ✓ 当前" : "");
+                 strcmp(g_models[i].id, g_cur_model) == 0 ? " (当前)" : "");
         ts = TTF_RenderUTF8_Blended(g_font, label,
                                     strcmp(g_models[i].id, g_cur_model) == 0
                                         ? COL_BRAND : COL_TEXT);
@@ -1923,7 +1926,7 @@ static void render_models(void) {
         if (y > WIN_H - 100) break;
     }
 
-    const char *hint = "↑↓ 选择    A 应用    B 返回    + 退出";
+    const char *hint = "方向键 选择    A 应用    B 返回    + 退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);

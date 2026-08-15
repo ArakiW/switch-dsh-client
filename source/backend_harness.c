@@ -19,6 +19,7 @@
 #include "backend_harness.h"
 #include "net.h"
 #include "cJSON.h"
+#include "util.h"
 
 #ifdef __SWITCH__
 #define SESSION_FILE "sdmc:/switch/switch-dsh-client/session_id.txt"
@@ -351,6 +352,7 @@ int harness_list_sessions(const backend_config_t *cfg,
             list[k].title = strdup(title->valuestring);
         else
             list[k].title = strdup(cJSON_IsTrue(blank) ? "空白会话" : "未命名会话");
+        utf8_sanitize(list[k].title); /* 剥 emoji 等缺字字符 */
         list[k].cwd = cJSON_IsString(cwd) ? strdup(cwd->valuestring) : NULL;
         list[k].running = cJSON_IsTrue(running);
         list[k].updated_at = cJSON_IsNumber(upd) ? (long long)upd->valuedouble : 0;
@@ -539,6 +541,7 @@ int harness_list_workspaces(const backend_config_t *cfg,
         list[k].title = cJSON_IsString(title) && title->valuestring[0]
                             ? strdup(title->valuestring)
                             : strdup("未命名工作区");
+        utf8_sanitize(list[k].title);
         list[k].session_count = cJSON_IsArray(sids) ? cJSON_GetArraySize(sids) : 0;
         k++;
     }
