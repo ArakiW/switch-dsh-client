@@ -90,6 +90,7 @@ $link = @(
     '--start-group',
     (Join-Path $portlib 'libSDL2_ttf.a'),
     (Join-Path $portlib 'libSDL2.a'),
+    (Join-Path $portlib 'libSDL2_gfx.a'),
     (Join-Path $portlib 'libfreetype.a'),
     (Join-Path $portlib 'libharfbuzz.a'),
     (Join-Path $portlib 'libfribidi.a'),

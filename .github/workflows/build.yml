@@ -17,7 +17,7 @@ jobs:
       - name: Install Switch libraries (portlibs)
         run: |
           dkp-pacman -S --noconfirm --needed \
-            switch-sdl2 switch-sdl2_ttf switch-sdl2_image \
+            switch-sdl2 switch-sdl2_ttf switch-sdl2_image switch-sdl2_gfx \
             switch-curl switch-mbedtls \
             switch-freetype switch-harfbuzz switch-zlib switch-libpng \
             switch-libjpeg-turbo switch-bzip2

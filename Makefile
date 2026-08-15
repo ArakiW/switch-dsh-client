@@ -46,7 +46,7 @@ LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*
 
 LIBS	:=	`$(PORTLIBS)/bin/curl-config --libs` \
 			`$(PORTLIBS)/bin/sdl2-config --libs` \
-			-lSDL2_ttf -lfreetype -lharfbuzz -lpng16 -lz -lm
+			-lSDL2_ttf -lSDL2_gfx -lfreetype -lharfbuzz -lpng16 -lz -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing

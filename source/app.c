@@ -4,6 +4,7 @@
 
 #include <SDL.h>
 #include <SDL_ttf.h>
+#include <SDL2/SDL2_gfxPrimitives.h>
 #include <switch.h>
 
 #include "app.h"
@@ -58,13 +59,24 @@ static app_event_t g_queue[MAX_QUEUE];
 static int g_q_head = 0, g_q_tail = 0, g_q_count = 0;
 static volatile int g_worker_busy = 0;
 
-static const SDL_Color COL_BG     = {  24,  26,  38, 255 };
-static const SDL_Color COL_HEADER = {  40,  44,  66, 255 };
-static const SDL_Color COL_USER   = {  66, 133, 244, 255 };
-static const SDL_Color COL_ASST   = {  58,  62,  84, 255 };
-static const SDL_Color COL_TEXT   = { 236, 238, 246, 255 };
-static const SDL_Color COL_HINT   = { 150, 156, 176, 255 };
-static const SDL_Color COL_ACCENT = { 120, 180, 255, 255 };
+/* 配色对齐 DeepSeek Harness Web 暗色主题(design-platform.css) */
+static const SDL_Color COL_BG    = {  21,  21,  23, 255 }; /* bg-base (bluish-950) */
+static const SDL_Color COL_SURF  = {  27,  27,  28, 255 }; /* sidebar/layer-1 (bluish-900) */
+static const SDL_Color COL_SURF2 = {  53,  54,  56, 255 }; /* layer-2/hover (bluish-800) */
+static const SDL_Color COL_BRAND = {  86, 134, 254, 255 }; /* DeepSeek 蓝 (deepseek-450) */
+static const SDL_Color COL_TEXT  = { 235, 238, 242, 255 }; /* label-primary (bluish-100) */
+static const SDL_Color COL_TEXT2 = { 151, 157, 166, 255 }; /* label-secondary (bluish-500) */
+static const SDL_Color COL_TEXT3 = { 129, 133, 140, 255 }; /* label-tertiary (bluish-600) */
+static const SDL_Color COL_GREEN = {  34, 197,  94, 255 }; /* success (green-500) */
+static const SDL_Color COL_RED   = { 239,  68,  68, 255 }; /* error (red-500) */
+static const SDL_Color COL_WHITE = { 255, 255, 255, 255 };
+
+/* 兼容旧命名 */
+#define COL_HEADER COL_SURF
+#define COL_USER   COL_BRAND
+#define COL_ASST   COL_SURF
+#define COL_HINT   COL_TEXT3
+#define COL_ACCENT COL_BRAND
 
 /* 资源加载:本机 Windows 构建经 objcopy 把字体嵌入 rodata(weak 符号);
  * 标准 devkitPro(CI)构建走 romfs。符号未嵌入时为 NULL。 */
@@ -314,10 +326,13 @@ static void render_chat(void) {
     SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
     SDL_RenderClear(g_ren);
 
-    /* 顶栏 */
-    SDL_SetRenderDrawColor(g_ren, COL_HEADER.r, COL_HEADER.g, COL_HEADER.b, 255);
+    /* 顶栏(sidebar-fill + 底部发丝线) */
+    SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
     SDL_Rect hdr = { 0, 0, WIN_W, HEADER_H };
     SDL_RenderFillRect(g_ren, &hdr);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+    SDL_Rect hair = { 0, HEADER_H - 1, WIN_W, 1 };
+    SDL_RenderFillRect(g_ren, &hair);
 
     char title[128];
     snprintf(title, sizeof(title), "DSH Switch 客户端");
@@ -380,25 +395,37 @@ static void render_chat(void) {
         int bh = nl * lineh + pad_y * 2;
         int bx = (m->role == ROLE_USER) ? (WIN_W - mx - bw - pad_x * 2) : mx;
 
-        SDL_SetRenderDrawColor(g_ren,
-                               m->role == ROLE_USER ? COL_USER.r : COL_ASST.r,
-                               m->role == ROLE_USER ? COL_USER.g : COL_ASST.g,
-                               m->role == ROLE_USER ? COL_USER.b : COL_ASST.b,
-                               255);
-        SDL_Rect bubble = { bx, y, bw + pad_x * 2, bh };
-        SDL_RenderFillRect(g_ren, &bubble);
+        /* Harness 风格圆角气泡:用户=品牌蓝,助手=surface+发丝边框 */
+        if (y > -32000 && y < 32000) {
+            if (m->role == ROLE_USER) {
+                roundedBoxRGBA(g_ren, (Sint16)bx, (Sint16)y,
+                               (Sint16)(bx + bw + pad_x * 2), (Sint16)(y + bh), 12,
+                               COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
+            } else {
+                roundedBoxRGBA(g_ren, (Sint16)bx, (Sint16)y,
+                               (Sint16)(bx + bw + pad_x * 2), (Sint16)(y + bh), 12,
+                               COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+                roundedRectangleRGBA(g_ren, (Sint16)bx, (Sint16)y,
+                                     (Sint16)(bx + bw + pad_x * 2), (Sint16)(y + bh), 12,
+                                     COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+            }
+        }
 
+        SDL_Color text_col = (m->role == ROLE_USER) ? COL_WHITE : COL_TEXT;
         for (int j = 0; j < nl; j++) {
-            draw_line(g_font, COL_TEXT, bx + pad_x, y + pad_y + j * lineh,
+            draw_line(g_font, text_col, bx + pad_x, y + pad_y + j * lineh,
                       m->text, lines[j].off, lines[j].len);
         }
         y += bh + 12;
     }
 
-    /* 底栏 */
-    SDL_SetRenderDrawColor(g_ren, COL_HEADER.r, COL_HEADER.g, COL_HEADER.b, 255);
+    /* 底栏(composer 风格:surface + 顶部发丝线) */
+    SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
     SDL_Rect ftr = { 0, WIN_H - FOOTER_H, WIN_W, FOOTER_H };
     SDL_RenderFillRect(g_ren, &ftr);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+    SDL_Rect fhair = { 0, WIN_H - FOOTER_H, WIN_W, 1 };
+    SDL_RenderFillRect(g_ren, &fhair);
 
     const char *hint = g_worker_busy ? "回复中…请稍候    + 退出"
                                      : "A 输入消息    X 清屏    Y 设置    + 退出";
@@ -538,11 +565,11 @@ static void render_settings(void) {
     for (int i = 0; i < SET_COUNT; i++) {
         int y = HEADER_H + 20 + i * row_h;
 
-        /* 选中高亮 */
+        /* 选中高亮(layer-2 圆角) */
         if (i == g_set_idx) {
-            SDL_SetRenderDrawColor(g_ren, 52, 58, 88, 255);
-            SDL_Rect hl = { 20, y - 6, WIN_W - 40, row_h - 4 };
-            SDL_RenderFillRect(g_ren, &hl);
+            roundedBoxRGBA(g_ren, 20, (Sint16)(y - 6), WIN_W - 40,
+                           (Sint16)(y - 6 + row_h - 4), 8,
+                           COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
         }
 
         char label[64];
@@ -627,16 +654,26 @@ static void render_choice(void) {
 
     for (int i = 0; i < 2; i++) {
         SDL_Rect card = { 140, 200 + i * 190, WIN_W - 280, 160 };
+        roundedBoxRGBA(g_ren, (Sint16)card.x, (Sint16)card.y,
+                       (Sint16)(card.x + card.w), (Sint16)(card.y + card.h), 12,
+                       COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
         if (i == g_choice_idx) {
-            SDL_SetRenderDrawColor(g_ren, 52, 88, 140, 255);
+            /* 选中:DeepSeek 蓝描边 */
+            roundedRectangleRGBA(g_ren, (Sint16)card.x, (Sint16)card.y,
+                                 (Sint16)(card.x + card.w), (Sint16)(card.y + card.h), 12,
+                                 COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
+            roundedRectangleRGBA(g_ren, (Sint16)(card.x + 1), (Sint16)(card.y + 1),
+                                 (Sint16)(card.x + card.w - 1), (Sint16)(card.y + card.h - 1), 11,
+                                 COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
         } else {
-            SDL_SetRenderDrawColor(g_ren, COL_ASST.r, COL_ASST.g, COL_ASST.b, 255);
+            roundedRectangleRGBA(g_ren, (Sint16)card.x, (Sint16)card.y,
+                                 (Sint16)(card.x + card.w), (Sint16)(card.y + card.h), 12,
+                                 COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
         }
-        SDL_RenderFillRect(g_ren, &card);
 
         /* 选中标记 */
         ts = TTF_RenderUTF8_Blended(g_font_title,
-                                    i == g_choice_idx ? "▶" : "  ", COL_TEXT);
+                                    i == g_choice_idx ? "▶" : "  ", COL_BRAND);
         if (ts) {
             SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
             SDL_Rect d = { card.x + 28, card.y + 20, ts->w, ts->h };
@@ -654,7 +691,7 @@ static void render_choice(void) {
             SDL_FreeSurface(ts);
         }
 
-        ts = TTF_RenderUTF8_Blended(g_font_hint, descs[i], COL_TEXT);
+        ts = TTF_RenderUTF8_Blended(g_font_hint, descs[i], COL_TEXT2);
         if (ts) {
             SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
             SDL_Rect d = { card.x + 84, card.y + 66, ts->w, ts->h };
