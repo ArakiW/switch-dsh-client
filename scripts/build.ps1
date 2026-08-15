@@ -68,7 +68,8 @@ try {
 # unreliable; F1RaceWatch proved the objcopy route on real hardware).
 $assets = @(
     @('assets\NotoSansCJKsc-Regular.otf','noto_font.o'),
-    @('assets\cacert.pem','cacert.o')
+    @('assets\cacert.pem','cacert.o'),
+    @('assets\logo.png','logo.o')
 )
 foreach ($entry in $assets) {
     $src = Join-Path $repo $entry[0]
@@ -91,10 +92,13 @@ $link = @(
     (Join-Path $portlib 'libSDL2_ttf.a'),
     (Join-Path $portlib 'libSDL2.a'),
     (Join-Path $portlib 'libSDL2_gfx.a'),
+    (Join-Path $portlib 'libSDL2_image.a'),
     (Join-Path $portlib 'libfreetype.a'),
     (Join-Path $portlib 'libharfbuzz.a'),
     (Join-Path $portlib 'libfribidi.a'),
     (Join-Path $portlib 'libpng16.a'),
+    (Join-Path $portlib 'libjpeg.a'),
+    (Join-Path $portlib 'libwebp.a'),
     (Join-Path $portlib 'libbz2.a'),
     (Join-Path $portlib 'libz.a'),
     (Join-Path $portlib 'libcurl.a'),
@@ -117,7 +121,7 @@ $nacp = Join-Path $build 'switch-dsh-client.nacp'
 $nro  = Join-Path $repo 'switch-dsh-client.nro'
 & (Join-Path $switchTools 'nacptool.exe') --create 'DSH Switch Client' 'switch-dsh-client' '0.1.0' $nacp
 if ($LASTEXITCODE -ne 0) { throw 'nacp failed' }
-& (Join-Path $switchTools 'elf2nro.exe') $elf $nro "--nacp=$nacp" "--icon=$(Join-Path $toolRoot 'libnx\default_icon.jpg')"
+& (Join-Path $switchTools 'elf2nro.exe') $elf $nro "--nacp=$nacp" "--icon=$(Join-Path $repo 'icon.jpg')"
 if ($LASTEXITCODE -ne 0) { throw 'nro failed' }
 
 Get-Item $nro | Select-Object FullName, Length

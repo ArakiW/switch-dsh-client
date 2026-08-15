@@ -6,6 +6,7 @@
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include <SDL2/SDL2_gfxPrimitives.h>
+#include <SDL2/SDL_image.h>
 #include <switch.h>
 
 #include "app.h"
@@ -120,6 +121,10 @@ static const SDL_Color COL_WHITE = { 255, 255, 255, 255 };
  * 标准 devkitPro(CI)构建走 romfs。符号未嵌入时为 NULL。 */
 __attribute__((weak)) extern const unsigned char _binary_NotoSansCJKsc_Regular_otf_start[];
 __attribute__((weak)) extern const unsigned char _binary_NotoSansCJKsc_Regular_otf_end[];
+__attribute__((weak)) extern const unsigned char _binary_logo_png_start[];
+__attribute__((weak)) extern const unsigned char _binary_logo_png_end[];
+
+static SDL_Texture *g_logo_tex = NULL;
 
 static TTF_Font *open_font(int ptsize) {
     TTF_Font *f = TTF_OpenFont("romfs:/fonts/NotoSansCJKsc-Regular.otf", ptsize);
@@ -394,11 +399,16 @@ static void render_chat(void) {
     SDL_RenderFillRect(g_ren, &hair);
 
     char title[128];
+    /* LOGO */
+    if (g_logo_tex) {
+        SDL_Rect ld = { 12, (HEADER_H - 42) / 2, 42, 42 };
+        SDL_RenderCopy(g_ren, g_logo_tex, NULL, &ld);
+    }
     snprintf(title, sizeof(title), "DSH Switch 客户端");
     SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, title, COL_TEXT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-        SDL_Rect d = { 24, (HEADER_H - ts->h) / 2, ts->w, ts->h };
+        SDL_Rect d = { 66, (HEADER_H - ts->h) / 2, ts->w, ts->h };
         SDL_RenderCopy(g_ren, tt, NULL, &d);
         SDL_DestroyTexture(tt);
         SDL_FreeSurface(ts);
@@ -915,7 +925,7 @@ static void choice_input(u64 kDown) {
     /* 触摸:点卡片 = 选中并确认 */
     if (g_tap_x >= 0) {
         for (int i = 0; i < 2; i++) {
-            SDL_Rect card = { 140, 200 + i * 190, WIN_W - 280, 160 };
+            SDL_Rect card = { 140, 210 + i * 190, WIN_W - 280, 160 };
             if (g_tap_x >= card.x && g_tap_x <= card.x + card.w &&
                 g_tap_y >= card.y && g_tap_y <= card.y + card.h) {
                 g_choice_idx = i;
@@ -947,10 +957,16 @@ static void render_choice(void) {
     SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
     SDL_RenderClear(g_ren);
 
+    /* LOGO(居中) */
+    if (g_logo_tex) {
+        SDL_Rect ld = { (WIN_W - 96) / 2, 36, 96, 96 };
+        SDL_RenderCopy(g_ren, g_logo_tex, NULL, &ld);
+    }
+
     SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, "选择后端", COL_TEXT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-        SDL_Rect d = { (WIN_W - ts->w) / 2, 60, ts->w, ts->h };
+        SDL_Rect d = { (WIN_W - ts->w) / 2, 146, ts->w, ts->h };
         SDL_RenderCopy(g_ren, tt, NULL, &d);
         SDL_DestroyTexture(tt);
         SDL_FreeSurface(ts);
@@ -967,7 +983,7 @@ static void render_choice(void) {
     };
 
     for (int i = 0; i < 2; i++) {
-        SDL_Rect card = { 140, 200 + i * 190, WIN_W - 280, 160 };
+        SDL_Rect card = { 140, 210 + i * 190, WIN_W - 280, 160 };
         roundedBoxRGBA(g_ren, (Sint16)card.x, (Sint16)card.y,
                        (Sint16)(card.x + card.w), (Sint16)(card.y + card.h), 12,
                        COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
@@ -1941,6 +1957,7 @@ int app_init(void) {
         printf("app: TTF_Init failed: %s\n", TTF_GetError());
         return -1;
     }
+    IMG_Init(IMG_INIT_PNG);
 
     g_font       = open_font(30);
     g_font_title = open_font(36);
@@ -1948,6 +1965,23 @@ int app_init(void) {
     if (!g_font || !g_font_title || !g_font_hint) {
         printf("app: font load failed: %s\n", TTF_GetError());
         return -1;
+    }
+
+    /* LOGO:romfs 优先,否则嵌入内存 */
+    {
+        SDL_Surface *logo_surf = IMG_Load("romfs:/logo.png");
+        if (!logo_surf && _binary_logo_png_start != NULL) {
+            size_t size = (size_t)(_binary_logo_png_end - _binary_logo_png_start);
+            if (size > 0 && size < 0x7FFFFFFF) {
+                SDL_RWops *rw = SDL_RWFromConstMem(_binary_logo_png_start, (int)size);
+                if (rw) logo_surf = IMG_Load_RW(rw, 1);
+            }
+        }
+        if (logo_surf) {
+            g_logo_tex = SDL_CreateTextureFromSurface(g_ren, logo_surf);
+            SDL_FreeSurface(logo_surf);
+        }
+        if (!g_logo_tex) printf("app: logo load skipped\n");
     }
 
     config_load(&g_cfg);
@@ -2075,6 +2109,8 @@ void app_exit(void) {
     app_event_t ev;
     while (pop_event(&ev)) free(ev.text);
     if (g_q_mtx) SDL_DestroyMutex(g_q_mtx);
+    if (g_logo_tex) SDL_DestroyTexture(g_logo_tex);
+    g_logo_tex = NULL;
     if (g_font) TTF_CloseFont(g_font);
     if (g_font_title) TTF_CloseFont(g_font_title);
     if (g_font_hint) TTF_CloseFont(g_font_hint);
