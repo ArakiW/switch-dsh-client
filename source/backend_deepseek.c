@@ -46,11 +46,18 @@ static int ds_on_line(const char *line, void *ud) {
         if (cJSON_IsArray(choices) && cJSON_GetArraySize(choices) > 0) {
             const cJSON *ch = cJSON_GetArrayItem(choices, 0);
             const cJSON *delta = ch ? cJSON_GetObjectItemCaseSensitive(ch, "delta") : NULL;
-            const cJSON *content = delta ? cJSON_GetObjectItemCaseSensitive(delta, "content") : NULL;
-            if (cJSON_IsString(content) && content->valuestring[0]) {
-                if (c->on_chunk) c->on_chunk(content->valuestring, c->ud);
+            if (delta) {
+                /* 思考过程(thinking 开启时) */
+                const cJSON *reasoning = cJSON_GetObjectItemCaseSensitive(delta, "reasoning_content");
+                if (cJSON_IsString(reasoning) && reasoning->valuestring[0]) {
+                    if (c->on_chunk) c->on_chunk(reasoning->valuestring, 1, c->ud);
+                }
+                /* 正文 */
+                const cJSON *content = cJSON_GetObjectItemCaseSensitive(delta, "content");
+                if (cJSON_IsString(content) && content->valuestring[0]) {
+                    if (c->on_chunk) c->on_chunk(content->valuestring, 0, c->ud);
+                }
             }
-            /* reasoning_content(thinking 模式):一期忽略 */
             const cJSON *fr = ch ? cJSON_GetObjectItemCaseSensitive(ch, "finish_reason") : NULL;
             if (cJSON_IsString(fr) && fr->valuestring[0]) {
                 c->done = 1;

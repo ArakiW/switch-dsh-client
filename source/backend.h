@@ -37,10 +37,11 @@ typedef struct {
 
 /*
  * 流式回调。
+ * is_reasoning:0 = 正文增量,1 = 思考过程增量(以暗色显示)。
  * 注意:实现可在后台线程中调用这两个回调,调用方(UI)必须自行
  * 把数据投递到主线程(互斥队列),不要在回调里直接碰 SDL 纹理。
  */
-typedef void (*backend_chunk_cb)(const char *delta, void *userdata);
+typedef void (*backend_chunk_cb)(const char *delta, int is_reasoning, void *userdata);
 typedef void (*backend_done_cb)(int ok, const char *error, void *userdata);
 
 /*

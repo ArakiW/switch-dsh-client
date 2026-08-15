@@ -25,9 +25,10 @@
 #define MAX_QUEUE    512
 
 typedef struct {
-    char *text; /* malloc, UTF-8 */
-    int role;   /* ROLE_USER / ROLE_ASSISTANT */
-    int done;   /* 助手消息是否已结束(流式标记) */
+    char *text;  /* 正文, malloc, UTF-8 */
+    char *think; /* 思考过程(可 NULL) */
+    int role;    /* ROLE_USER / ROLE_ASSISTANT */
+    int done;    /* 助手消息是否已结束(流式标记) */
 } msg_t;
 
 /* 工作线程 -> 主线程 事件队列 */
@@ -94,6 +95,7 @@ static SDL_mutex *g_q_mtx = NULL;
 static app_event_t g_queue[MAX_QUEUE];
 static int g_q_head = 0, g_q_tail = 0, g_q_count = 0;
 static volatile int g_worker_busy = 0;
+static int g_stream_think = 0; /* 当前流式处于思考阶段 */
 
 /* 配色对齐 DeepSeek Harness Web 暗色主题(design-platform.css) */
 static const SDL_Color COL_BG    = {  21,  21,  23, 255 }; /* bg-base (bluish-950) */
@@ -140,12 +142,14 @@ static void add_msg(int role, const char *text, int done) {
     if (!text) text = "";
     if (g_nmsgs >= MAX_MSGS) {
         free(g_msgs[0].text);
+        free(g_msgs[0].think);
         memmove(&g_msgs[0], &g_msgs[1], sizeof(msg_t) * (MAX_MSGS - 1));
         g_nmsgs = MAX_MSGS - 1;
     }
     msg_t *m = &g_msgs[g_nmsgs++];
     m->text = malloc(strlen(text) + 1);
     if (m->text) strcpy(m->text, text);
+    m->think = NULL;
     m->role = role;
     m->done = done;
     g_dirty = 1;
@@ -182,9 +186,9 @@ static int pop_event(app_event_t *out) {
 
 /* ---------- 后台线程 ---------- */
 
-static void backend_chunk(const char *delta, void *ud) {
+static void backend_chunk(const char *delta, int is_reasoning, void *ud) {
     (void)ud;
-    push_event(1, delta);
+    push_event(is_reasoning ? 4 : 1, delta);
 }
 
 static void backend_done(int ok, const char *error, void *ud) {
@@ -272,6 +276,24 @@ static void drain_queue(void) {
                     }
                 }
             }
+            g_stream_think = 0;
+            g_dirty = 1;
+        } else if (ev.kind == 4) {
+            /* 思考增量 */
+            if (g_nmsgs > 0) {
+                msg_t *m = &g_msgs[g_nmsgs - 1];
+                if (m->role == ROLE_ASSISTANT && !m->done) {
+                    size_t old = m->think ? strlen(m->think) : 0;
+                    size_t add = strlen(ev.text ? ev.text : "");
+                    char *nt = (char *)realloc(m->think, old + add + 1);
+                    if (nt) {
+                        if (!m->think) nt[0] = '\0';
+                        memcpy(nt + old, ev.text ? ev.text : "", add + 1);
+                        m->think = nt;
+                    }
+                }
+            }
+            g_stream_think = 1;
             g_dirty = 1;
         } else if (ev.kind == 2) {
             if (g_nmsgs > 0) {
@@ -279,6 +301,7 @@ static void drain_queue(void) {
                 if (g_msgs[g_nmsgs - 1].text[0] == '\0')
                     strcpy(g_msgs[g_nmsgs - 1].text, "(无回复内容)");
             }
+            g_stream_think = 0;
             g_dirty = 1;
         } else if (ev.kind == 3) {
             if (g_nmsgs > 0) {
@@ -401,11 +424,15 @@ static void render_chat(void) {
     const int pad_x = 14;
     const int pad_y = 10;
 
-    /* 先测总高,自动贴底 */
+    /* 先测总高,自动贴底(含思考段) */
     int total_h = 0;
     for (int i = 0; i < g_nmsgs; i++) {
-        int nl = wrap_text(g_font, maxw, g_msgs[i].text, NULL, MAX_LINES);
-        total_h += nl * lineh + pad_y * 2 + 12;
+        msg_t *mm = &g_msgs[i];
+        int nl = wrap_text(g_font, maxw, mm->text, NULL, MAX_LINES);
+        int tnl = 0;
+        if (mm->think && mm->think[0])
+            tnl = wrap_text(g_font, maxw, mm->think, NULL, MAX_LINES);
+        total_h += (nl + tnl) * lineh + pad_y * 2 + 12 + (tnl > 0 ? 10 : 0);
     }
     int y = area_y0;
     if (total_h > (area_y1 - area_y0)) y -= (total_h - (area_y1 - area_y0));
@@ -413,10 +440,14 @@ static void render_chat(void) {
     for (int i = 0; i < g_nmsgs; i++) {
         msg_t *m = &g_msgs[i];
         wrap_line_t lines[MAX_LINES];
+        wrap_line_t tlines[MAX_LINES];
         int nl = wrap_text(g_font, maxw, m->text, lines, MAX_LINES);
-        if (nl <= 0) continue;
+        int tnl = 0;
+        if (m->think && m->think[0])
+            tnl = wrap_text(g_font, maxw, m->think, tlines, MAX_LINES);
+        if (nl <= 0 && tnl <= 0) continue;
 
-        /* 气泡宽 = 最宽行 */
+        /* 气泡宽 = 最宽行(正文+思考) */
         int bw = 0;
         for (int j = 0; j < nl; j++) {
             char buf[MAX_LINE_LEN];
@@ -428,7 +459,17 @@ static void render_chat(void) {
             TTF_SizeUTF8(g_font, buf, &w, &h);
             if (w > bw) bw = w;
         }
-        int bh = nl * lineh + pad_y * 2;
+        for (int j = 0; j < tnl; j++) {
+            char buf[MAX_LINE_LEN];
+            size_t len = tlines[j].len;
+            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+            memcpy(buf, m->think + tlines[j].off, len);
+            buf[len] = '\0';
+            int w = 0, h = 0;
+            TTF_SizeUTF8(g_font, buf, &w, &h);
+            if (w > bw) bw = w;
+        }
+        int bh = (nl + tnl) * lineh + pad_y * 2 + (tnl > 0 ? 10 : 0);
         int bx = (m->role == ROLE_USER) ? (WIN_W - mx - bw - pad_x * 2) : mx;
 
         /* Harness 风格圆角气泡:用户=品牌蓝,助手=surface+发丝边框 */
@@ -447,9 +488,22 @@ static void render_chat(void) {
             }
         }
 
+        int ty = y + pad_y;
+        /* 思考过程(暗色,带分隔线) */
+        if (tnl > 0) {
+            for (int j = 0; j < tnl; j++) {
+                draw_line(g_font, COL_TEXT3, bx + pad_x, ty + j * lineh,
+                          m->think, tlines[j].off, tlines[j].len);
+            }
+            SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+            SDL_Rect div = { bx + pad_x, ty + tnl * lineh + 4, bw, 1 };
+            SDL_RenderFillRect(g_ren, &div);
+            ty += tnl * lineh + 10;
+        }
+        /* 正文 */
         SDL_Color text_col = (m->role == ROLE_USER) ? COL_WHITE : COL_TEXT;
         for (int j = 0; j < nl; j++) {
-            draw_line(g_font, text_col, bx + pad_x, y + pad_y + j * lineh,
+            draw_line(g_font, text_col, bx + pad_x, ty + j * lineh,
                       m->text, lines[j].off, lines[j].len);
         }
         y += bh + 12;
@@ -463,10 +517,12 @@ static void render_chat(void) {
     SDL_Rect fhair = { 0, WIN_H - FOOTER_H, WIN_W, 1 };
     SDL_RenderFillRect(g_ren, &fhair);
 
-    const char *hint = g_worker_busy ? "回复中…请稍候    + 退出"
-                       : (strcmp(g_cfg.backend, "harness") == 0
-                          ? "A 输入  X 工作区  Y 设置  L 模型  R 切后端  + 退出"
-                          : "A 输入  X 清屏  Y 设置  L 模型  R 切后端  + 退出");
+    const char *hint = g_worker_busy
+                           ? (g_stream_think ? "思考中…请稍候    + 退出"
+                                             : "回复中…请稍候    + 退出")
+                           : (strcmp(g_cfg.backend, "harness") == 0
+                              ? "A 输入  X 工作区  Y 设置  L 模型  R 切后端  + 退出"
+                              : "A 输入  X 清屏  Y 设置  L 模型  R 切后端  + 退出");
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -477,7 +533,9 @@ static void render_chat(void) {
     }
     if (g_nmsgs > 0 && g_msgs[g_nmsgs - 1].role == ROLE_ASSISTANT &&
         !g_msgs[g_nmsgs - 1].done) {
-        ts = TTF_RenderUTF8_Blended(g_font_hint, "● 回复中…", COL_ACCENT);
+        ts = TTF_RenderUTF8_Blended(g_font_hint,
+                                    g_stream_think ? "● 思考中…" : "● 回复中…",
+                                    COL_ACCENT);
         if (ts) {
             SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
             SDL_Rect d = { WIN_W - ts->w - 24, WIN_H - FOOTER_H + (FOOTER_H - ts->h) / 2,
@@ -983,7 +1041,9 @@ static void clear_msgs(void) {
     while (g_nmsgs > 0) {
         g_nmsgs--;
         free(g_msgs[g_nmsgs].text);
+        free(g_msgs[g_nmsgs].think);
         g_msgs[g_nmsgs].text = NULL;
+        g_msgs[g_nmsgs].think = NULL;
     }
 }
 
@@ -1995,7 +2055,10 @@ int app_frame(void) {
 }
 
 void app_exit(void) {
-    for (int i = 0; i < g_nmsgs; i++) free(g_msgs[i].text);
+    for (int i = 0; i < g_nmsgs; i++) {
+        free(g_msgs[i].text);
+        free(g_msgs[i].think);
+    }
     g_nmsgs = 0;
     harness_sessions_free(g_sessions, g_sessions_n);
     g_sessions = NULL;

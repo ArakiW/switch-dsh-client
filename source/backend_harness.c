@@ -207,13 +207,21 @@ static int on_sse_line(const char *line, void *ud) {
                     if (strcmp(etype->valuestring, "assistant/chunk") == 0) {
                         const cJSON *chunk = cJSON_GetObjectItemCaseSensitive(data, "chunk");
                         const cJSON *ctype = chunk ? cJSON_GetObjectItemCaseSensitive(chunk, "type") : NULL;
-                        if (cJSON_IsString(ctype) && strcmp(ctype->valuestring, "text-delta") == 0) {
-                            const cJSON *text = cJSON_GetObjectItemCaseSensitive(chunk, "text");
-                            if (cJSON_IsString(text) && text->valuestring[0]) {
-                                if (c->on_chunk) c->on_chunk(text->valuestring, c->ud);
+                        if (cJSON_IsString(ctype)) {
+                            if (strcmp(ctype->valuestring, "text-delta") == 0) {
+                                const cJSON *text = cJSON_GetObjectItemCaseSensitive(chunk, "text");
+                                if (cJSON_IsString(text) && text->valuestring[0]) {
+                                    if (c->on_chunk) c->on_chunk(text->valuestring, 0, c->ud);
+                                }
+                            } else if (strcmp(ctype->valuestring, "reasoning-delta") == 0) {
+                                /* 思考过程:单独通道,UI 以暗色显示 */
+                                const cJSON *text = cJSON_GetObjectItemCaseSensitive(chunk, "text");
+                                if (cJSON_IsString(text) && text->valuestring[0]) {
+                                    if (c->on_chunk) c->on_chunk(text->valuestring, 1, c->ud);
+                                }
                             }
                         }
-                        /* reasoning-delta / tool-call-delta / usage:一期忽略 */
+                        /* tool-call-delta / usage:忽略 */
                     } else if (strcmp(etype->valuestring, "assistant/message") == 0 ||
                                strcmp(etype->valuestring, "turn/end") == 0) {
                         c->finished = 1;
