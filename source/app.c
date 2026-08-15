@@ -7,6 +7,7 @@
 #include <switch.h>
 
 #include "app.h"
+#include "backend.h"
 #include "config.h"
 #include "textinput.h"
 #include "util.h"
@@ -18,12 +19,19 @@
 #define MAX_MSGS     256
 #define MAX_LINE_LEN 4096
 #define MAX_LINES    128
+#define MAX_QUEUE    512
 
 typedef struct {
     char *text; /* malloc, UTF-8 */
     int role;   /* ROLE_USER / ROLE_ASSISTANT */
     int done;   /* 助手消息是否已结束(流式标记) */
 } msg_t;
+
+/* 工作线程 -> 主线程 事件队列 */
+typedef struct {
+    int kind;   /* 1=正文增量 2=完成 3=失败 */
+    char *text; /* kind==1 增量文本;kind==3 错误文本;kind==2 NULL */
+} app_event_t;
 
 static SDL_Window   *g_win   = NULL;
 static SDL_Renderer *g_ren   = NULL;
@@ -38,6 +46,20 @@ static PadState g_pad;
 static char g_input[4096];
 static int g_want_exit = 0;
 static int g_dirty = 1;
+
+/* 后台请求 */
+static SDL_mutex *g_q_mtx = NULL;
+static app_event_t g_queue[MAX_QUEUE];
+static int g_q_head = 0, g_q_tail = 0, g_q_count = 0;
+static volatile int g_worker_busy = 0;
+
+static const SDL_Color COL_BG     = {  24,  26,  38, 255 };
+static const SDL_Color COL_HEADER = {  40,  44,  66, 255 };
+static const SDL_Color COL_USER   = {  66, 133, 244, 255 };
+static const SDL_Color COL_ASST   = {  58,  62,  84, 255 };
+static const SDL_Color COL_TEXT   = { 236, 238, 246, 255 };
+static const SDL_Color COL_HINT   = { 150, 156, 176, 255 };
+static const SDL_Color COL_ACCENT = { 120, 180, 255, 255 };
 
 /* 资源加载:本机 Windows 构建经 objcopy 把字体嵌入 rodata(weak 符号);
  * 标准 devkitPro(CI)构建走 romfs。符号未嵌入时为 NULL。 */
@@ -59,14 +81,6 @@ static TTF_Font *open_font(int ptsize) {
     return NULL;
 }
 
-static const SDL_Color COL_BG     = {  24,  26,  38, 255 };
-static const SDL_Color COL_HEADER = {  40,  44,  66, 255 };
-static const SDL_Color COL_USER   = {  66, 133, 244, 255 };
-static const SDL_Color COL_ASST   = {  58,  62,  84, 255 };
-static const SDL_Color COL_TEXT   = { 236, 238, 246, 255 };
-static const SDL_Color COL_HINT   = { 150, 156, 176, 255 };
-static const SDL_Color COL_ACCENT = { 120, 180, 255, 255 };
-
 /* ---------- 消息列表 ---------- */
 
 static void add_msg(int role, const char *text, int done) {
@@ -82,6 +96,156 @@ static void add_msg(int role, const char *text, int done) {
     m->role = role;
     m->done = done;
     g_dirty = 1;
+}
+
+/* ---------- 事件队列 ---------- */
+
+static void push_event(int kind, const char *text) {
+    SDL_LockMutex(g_q_mtx);
+    if (g_q_count >= MAX_QUEUE) {
+        SDL_UnlockMutex(g_q_mtx);
+        return; /* 丢弃(理论上到不了) */
+    }
+    app_event_t *e = &g_queue[g_q_tail];
+    e->kind = kind;
+    e->text = text ? strdup(text) : NULL;
+    g_q_tail = (g_q_tail + 1) % MAX_QUEUE;
+    g_q_count++;
+    SDL_UnlockMutex(g_q_mtx);
+}
+
+static int pop_event(app_event_t *out) {
+    SDL_LockMutex(g_q_mtx);
+    if (g_q_count == 0) {
+        SDL_UnlockMutex(g_q_mtx);
+        return 0;
+    }
+    *out = g_queue[g_q_head];
+    g_q_head = (g_q_head + 1) % MAX_QUEUE;
+    g_q_count--;
+    SDL_UnlockMutex(g_q_mtx);
+    return 1;
+}
+
+/* ---------- 后台线程 ---------- */
+
+static void backend_chunk(const char *delta, void *ud) {
+    (void)ud;
+    push_event(1, delta);
+}
+
+static void backend_done(int ok, const char *error, void *ud) {
+    (void)ud;
+    if (ok) push_event(2, NULL);
+    else push_event(3, error ? error : "未知错误");
+}
+
+typedef struct {
+    backend_config_t cfg;
+    chat_message_t *history;
+    size_t n_history;
+} worker_arg_t;
+
+static void cfg_clone(backend_config_t *dst, const backend_config_t *src) {
+    memset(dst, 0, sizeof(*dst));
+    dst->backend          = strdup(src->backend ? src->backend : "");
+    dst->harness_base_url = strdup(src->harness_base_url ? src->harness_base_url : "");
+    dst->deepseek_base_url = strdup(src->deepseek_base_url ? src->deepseek_base_url : "");
+    dst->deepseek_api_key  = strdup(src->deepseek_api_key ? src->deepseek_api_key : "");
+    dst->model             = strdup(src->model ? src->model : "");
+    dst->deepseek_thinking = strdup(src->deepseek_thinking ? src->deepseek_thinking : "");
+    dst->system_prompt     = strdup(src->system_prompt ? src->system_prompt : "");
+}
+
+static int worker_fn(void *arg) {
+    worker_arg_t *wa = (worker_arg_t *)arg;
+    const backend_vtable_t *be = backend_resolve(&wa->cfg);
+    printf("worker: backend=%s\n", be->name);
+    be->chat(&wa->cfg, wa->history, wa->n_history, backend_chunk, backend_done, NULL);
+
+    for (size_t i = 0; i < wa->n_history; i++) free(wa->history[i].content);
+    free(wa->history);
+    config_free(&wa->cfg);
+    free(wa);
+    g_worker_busy = 0;
+    return 0;
+}
+
+static void start_worker(void) {
+    worker_arg_t *wa = (worker_arg_t *)calloc(1, sizeof(*wa));
+    if (!wa) return;
+    cfg_clone(&wa->cfg, &g_cfg);
+
+    /* 拷贝历史(不含末尾的空助手占位) */
+    size_t n = (size_t)g_nmsgs;
+    if (n > 0 && g_msgs[n - 1].role == ROLE_ASSISTANT && !g_msgs[n - 1].done) n--;
+    wa->history = (chat_message_t *)calloc(n ? n : 1, sizeof(chat_message_t));
+    if (!wa->history) {
+        config_free(&wa->cfg);
+        free(wa);
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        wa->history[i].role = (chat_role_t)g_msgs[i].role;
+        wa->history[i].content = strdup(g_msgs[i].text ? g_msgs[i].text : "");
+    }
+    wa->n_history = n;
+
+    g_worker_busy = 1;
+    SDL_Thread *th = SDL_CreateThread(worker_fn, "backend", wa);
+    if (th) SDL_DetachThread(th);
+    else {
+        for (size_t i = 0; i < n; i++) free(wa->history[i].content);
+        free(wa->history);
+        config_free(&wa->cfg);
+        free(wa);
+        g_worker_busy = 0;
+    }
+}
+
+static void drain_queue(void) {
+    app_event_t ev;
+    while (pop_event(&ev)) {
+        if (ev.kind == 1) {
+            if (g_nmsgs > 0) {
+                msg_t *m = &g_msgs[g_nmsgs - 1];
+                if (m->role == ROLE_ASSISTANT && !m->done) {
+                    size_t old = strlen(m->text);
+                    size_t add = strlen(ev.text ? ev.text : "");
+                    char *nt = (char *)realloc(m->text, old + add + 1);
+                    if (nt) {
+                        memcpy(nt + old, ev.text ? ev.text : "", add + 1);
+                        m->text = nt;
+                    }
+                }
+            }
+            g_dirty = 1;
+        } else if (ev.kind == 2) {
+            if (g_nmsgs > 0) {
+                g_msgs[g_nmsgs - 1].done = 1;
+                if (g_msgs[g_nmsgs - 1].text[0] == '\0')
+                    strcpy(g_msgs[g_nmsgs - 1].text, "(无回复内容)");
+            }
+            g_dirty = 1;
+        } else if (ev.kind == 3) {
+            if (g_nmsgs > 0) {
+                msg_t *m = &g_msgs[g_nmsgs - 1];
+                size_t old = strlen(m->text);
+                char buf[640];
+                snprintf(buf, sizeof(buf), "%s[错误] %s",
+                         old == 0 ? "" : "\n", ev.text ? ev.text : "");
+                size_t add = strlen(buf);
+                char *nt = (char *)realloc(m->text, old + add + 1);
+                if (nt) {
+                    memcpy(nt + old, buf, add + 1);
+                    m->text = nt;
+                }
+                m->done = 1;
+            }
+            g_dirty = 1;
+        }
+        free(ev.text);
+    }
 }
 
 /* ---------- 文本换行 ---------- */
@@ -231,7 +395,8 @@ static void render(void) {
     SDL_Rect ftr = { 0, WIN_H - FOOTER_H, WIN_W, FOOTER_H };
     SDL_RenderFillRect(g_ren, &ftr);
 
-    const char *hint = "A 输入消息    X 清屏    + 退出";
+    const char *hint = g_worker_busy ? "回复中…请稍候    + 退出"
+                                     : "A 输入消息    X 清屏    + 退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -245,7 +410,8 @@ static void render(void) {
         ts = TTF_RenderUTF8_Blended(g_font_hint, "● 回复中…", COL_ACCENT);
         if (ts) {
             SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { WIN_W - ts->w - 24, WIN_H - FOOTER_H + (FOOTER_H - ts->h) / 2, ts->w, ts->h };
+            SDL_Rect d = { WIN_W - ts->w - 24, WIN_H - FOOTER_H + (FOOTER_H - ts->h) / 2,
+                           ts->w, ts->h };
             SDL_RenderCopy(g_ren, tt, NULL, &d);
             SDL_DestroyTexture(tt);
             SDL_FreeSurface(ts);
@@ -292,8 +458,13 @@ int app_init(void) {
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     padInitializeDefault(&g_pad);
 
+    g_q_mtx = SDL_CreateMutex();
+    if (!g_q_mtx) return -1;
+
     add_msg(ROLE_ASSISTANT,
-            "欢迎使用 DSH Switch 客户端。\n按 A 输入消息发送给 AI。(网络后端接入中)", 1);
+            "欢迎使用 DSH Switch 客户端。\n"
+            "按 A 输入消息发送给 AI;X 清屏;+ 退出。\n"
+            "配置:SD 卡 sdmc:/switch/switch-dsh-client/config.json", 1);
     return 0;
 }
 
@@ -304,16 +475,14 @@ int app_frame(void) {
     if (kDown & HidNpadButton_Plus) g_want_exit = 1;
     if (g_want_exit) return -1;
 
-    if (kDown & HidNpadButton_A) {
+    if ((kDown & HidNpadButton_A) && !g_worker_busy) {
         if (textinput_prompt("输入消息", NULL, 1, g_input, sizeof(g_input)) == 1) {
             add_msg(ROLE_USER, g_input, 1);
-            /* 占位:后端接入后由 backend 线程流式填充 */
-            char reply[512];
-            snprintf(reply, sizeof(reply), "(后端接入中)已收到:%s", g_input);
-            add_msg(ROLE_ASSISTANT, reply, 1);
+            add_msg(ROLE_ASSISTANT, "", 0); /* 流式占位 */
+            start_worker();
         }
     }
-    if (kDown & HidNpadButton_X) {
+    if ((kDown & HidNpadButton_X) && !g_worker_busy) {
         while (g_nmsgs > 0) {
             g_nmsgs--;
             free(g_msgs[g_nmsgs].text);
@@ -321,6 +490,8 @@ int app_frame(void) {
         }
         g_dirty = 1;
     }
+
+    drain_queue();
 
     if (g_dirty) {
         render();
@@ -333,6 +504,9 @@ int app_frame(void) {
 void app_exit(void) {
     for (int i = 0; i < g_nmsgs; i++) free(g_msgs[i].text);
     g_nmsgs = 0;
+    app_event_t ev;
+    while (pop_event(&ev)) free(ev.text);
+    if (g_q_mtx) SDL_DestroyMutex(g_q_mtx);
     if (g_font) TTF_CloseFont(g_font);
     if (g_font_title) TTF_CloseFont(g_font_title);
     if (g_font_hint) TTF_CloseFont(g_font_hint);

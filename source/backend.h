@@ -48,9 +48,11 @@ typedef void (*backend_done_cb)(int ok, const char *error, void *userdata);
  * n_history 为其长度。实现负责:
  *   - 组装请求(含 system_prompt、model 等)
  *   - 流式接收时逐个 delta 调 on_chunk
- *   - 结束时调 on_done(ok=1 成功;失败时 error 为可展示的 UTF-8 字符串)
- * 返回值:0 表示已启动(结果通过回调异步到达),非 0 表示启动失败
- * (此时不会调用任何回调)。
+ *   - 结果一律经 on_done 恰好一次汇报(ok=1 成功;ok=0 且 error 为
+ *     可展示的 UTF-8 文本);同步失败也走 on_done(0, err)
+ * 返回值:0 正常;-1 保留(实现同步失败时二选一:返回 -1 或回调 on_done,
+ * 但不要两者都做)。on_chunk/on_done 可能在后台线程触发,UI 必须自行
+ * 投递到主线程。
  */
 typedef int (*backend_chat_fn)(const backend_config_t *cfg,
                                const chat_message_t *history, size_t n_history,

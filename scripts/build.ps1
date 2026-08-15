@@ -44,6 +44,10 @@ $sources = @(
     @('source\config.c','config.o'),
     @('source\textinput.c','textinput.o'),
     @('source\util.c','util.o'),
+    @('source\net.c','net.o'),
+    @('source\backend.c','backend.o'),
+    @('source\backend_harness.c','backend_harness.o'),
+    @('source\backend_deepseek.c','backend_deepseek.o'),
     @('libs\cjson\cJSON.c','cJSON.o')
 )
 foreach ($entry in $sources) {
