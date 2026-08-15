@@ -19,6 +19,13 @@ int net_post_json(const char *url, const char *body, net_buffer_t *out,
                   long *http_code, char *err, size_t errsz);
 
 /*
+ * GET 请求并收集响应体(headers 为附加头数组,n_headers 条,可为空)。
+ * 返回 0 传输成功,-1 失败。out 由调用方释放。
+ */
+int net_get_json(const char *url, const char *const *headers, size_t n_headers,
+                 net_buffer_t *out, long *http_code, char *err, size_t errsz);
+
+/*
  * SSE 流式请求。method 为 "GET" 或 "POST";body 非 NULL 时作为 JSON 请求体发送。
  * headers 为附加头数组(如 "Authorization: Bearer xxx"),n_headers 条。
  * 每收到一条以 "data:" 开头的行,回调一次(参数为去掉前缀与空白后的内容,

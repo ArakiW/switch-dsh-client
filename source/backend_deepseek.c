@@ -136,6 +136,96 @@ static int ds_chat(const backend_config_t *cfg,
     return 0;
 }
 
+/* ---------- 模型 ---------- */
+
+/*
+ * 动态拉取模型列表(GET /models);失败或为空时回退内置列表。
+ * cur 直接取 cfg->model。
+ */
+int deepseek_list_models(const backend_config_t *cfg,
+                         model_option_t **out, size_t *out_n,
+                         char *cur, size_t cursz, char *err, size_t errsz) {
+    *out = NULL;
+    *out_n = 0;
+    if (cur && cursz)
+        snprintf(cur, cursz, "%s", cfg->model ? cfg->model : "");
+
+    const char *base = cfg->deepseek_base_url ? cfg->deepseek_base_url
+                                              : "https://api.deepseek.com";
+    char url[640];
+    snprintf(url, sizeof(url), "%s/models", base);
+    char auth[512];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s",
+             cfg->deepseek_api_key ? cfg->deepseek_api_key : "");
+    const char *hdrs[] = { auth };
+
+    net_buffer_t resp = {0};
+    long code = 0;
+    char e2[256] = {0};
+    if (net_get_json(url, hdrs, 1, &resp, &code, e2, sizeof(e2)) == 0 && code == 200) {
+        cJSON *root = cJSON_Parse(resp.data);
+        const cJSON *data = root ? cJSON_GetObjectItemCaseSensitive(root, "data") : NULL;
+        if (cJSON_IsArray(data) && cJSON_GetArraySize(data) > 0) {
+            size_t n = cJSON_GetArraySize(data);
+            model_option_t *list = (model_option_t *)calloc(n, sizeof(*list));
+            if (list) {
+                size_t k = 0;
+                for (size_t i = 0; i < n; i++) {
+                    const cJSON *m = cJSON_GetArrayItem(data, i);
+                    const cJSON *mid = cJSON_GetObjectItemCaseSensitive(m, "id");
+                    if (!cJSON_IsString(mid) || !mid->valuestring[0]) continue;
+                    list[k].id = strdup(mid->valuestring);
+                    list[k].name = strdup(mid->valuestring);
+                    list[k].provider = NULL;
+                    k++;
+                }
+                if (root) cJSON_Delete(root);
+                net_buffer_free(&resp);
+                if (k > 0) {
+                    *out = list;
+                    *out_n = k;
+                    return 0;
+                }
+                for (size_t i = 0; i < n; i++) {
+                    free(list[i].id);
+                    free(list[i].name);
+                }
+                free(list);
+            }
+        }
+        if (root) cJSON_Delete(root);
+    }
+    net_buffer_free(&resp);
+
+    /* 回退:内置列表 */
+    static const char *builtin[] = { "deepseek-v4-pro", "deepseek-v4-flash" };
+    model_option_t *list =
+        (model_option_t *)calloc(2, sizeof(*list));
+    if (!list) {
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+    for (int i = 0; i < 2; i++) {
+        list[i].id = strdup(builtin[i]);
+        list[i].name = strdup(builtin[i]);
+        list[i].provider = NULL;
+    }
+    *out = list;
+    *out_n = 2;
+    return 0;
+}
+
+int deepseek_apply_model(backend_config_t *cfg, const char *model_id,
+                         char *err, size_t errsz) {
+    if (!model_id || !model_id[0]) {
+        if (err && errsz) snprintf(err, errsz, "模型 id 为空");
+        return -1;
+    }
+    free(cfg->model);
+    cfg->model = strdup(model_id);
+    return cfg->model ? 0 : -1;
+}
+
 const backend_vtable_t backend_vtable_deepseek = {
     .name = "DeepSeek",
     .chat = ds_chat,

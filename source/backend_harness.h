@@ -3,11 +3,12 @@
 
 #include "backend.h"
 
-/* Harness 后端专属:会话(工作区)浏览、切换与历史加载 */
+/* Harness 后端专属:会话(工作区)浏览、切换、历史与模型 */
 
 typedef struct {
     char *session_id;
     char *title;        /* 会话标题;空白会话为 "空白会话" */
+    char *cwd;          /* 会话所在目录(用于按工作区过滤) */
     int running;        /* 是否有回合在跑 */
     long long updated_at; /* epoch ms */
 } harness_session_t;
@@ -27,5 +28,42 @@ int harness_use_session(const backend_config_t *cfg, const char *session_id,
 int harness_fetch_history(const backend_config_t *cfg,
                           chat_message_t **out_msgs, size_t *out_n,
                           char *err, size_t errsz);
+
+/* ---------- 工作区 ---------- */
+
+typedef struct {
+    char *workspace_id;
+    char *path;
+    char *title;
+    size_t session_count;
+} harness_workspace_t;
+
+int harness_list_workspaces(const backend_config_t *cfg,
+                            harness_workspace_t **out_list, size_t *out_n,
+                            char *err, size_t errsz);
+
+void harness_workspaces_free(harness_workspace_t *list, size_t n);
+
+/* 采纳一个目录为新工作区(workspace.create) */
+int harness_create_workspace(const backend_config_t *cfg, const char *path,
+                             char *err, size_t errsz);
+
+/* 在指定工作区新建会话并切换过去(workspace_id 为空 = 默认位置) */
+int harness_new_session_in(const backend_config_t *cfg, const char *workspace_id,
+                           char *err, size_t errsz);
+
+/* ---------- 模型 ---------- */
+
+/* 会话级模型目录 + 当前模型。成功 0;*out 由 harness_models_free 释放。 */
+int harness_list_models(const backend_config_t *cfg,
+                        model_option_t **out, size_t *out_n,
+                        char *cur, size_t cursz, char *err, size_t errsz);
+
+void harness_models_free(model_option_t *list, size_t n);
+
+/* 会话级选模型(session.selectModel) */
+int harness_select_model(const backend_config_t *cfg,
+                         const char *provider, const char *model,
+                         char *err, size_t errsz);
 
 #endif /* SWITCH_DSH_BACKEND_HARNESS_H */

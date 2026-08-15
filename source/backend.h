@@ -67,4 +67,31 @@ typedef struct {
 /* 按 cfg->backend 选择实现,未知值回退到 harness */
 const backend_vtable_t *backend_resolve(const backend_config_t *cfg);
 
+/* ---------- 模型选择(对话页直接切换版本) ---------- */
+
+typedef struct {
+    char *id;       /* 模型 id,如 deepseek-v4-pro */
+    char *name;     /* 展示名 */
+    char *provider; /* harness 的 provider(deepseek 后端为 NULL) */
+} model_option_t;
+
+/*
+ * 取可选模型列表并给当前模型(cur,可为 NULL 表示未知)。
+ * harness:session.models;deepseek:GET /models(失败回退内置列表)。
+ * 成功 0;*out 由 backend_models_free 释放。
+ */
+int backend_list_models(const backend_config_t *cfg,
+                        model_option_t **out, size_t *out_n,
+                        char *cur, size_t cursz, char *err, size_t errsz);
+
+void backend_models_free(model_option_t *list, size_t n);
+
+/*
+ * 应用所选模型:harness -> session.selectModel(会话级);
+ * deepseek -> 更新 cfg->model(调用方负责 config_save 持久化)。
+ * 成功 0,失败 -1(err 有信息)。
+ */
+int backend_apply_model(backend_config_t *cfg, const char *model_id,
+                        char *err, size_t errsz);
+
 #endif /* SWITCH_DSH_BACKEND_H */

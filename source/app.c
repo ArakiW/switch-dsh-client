@@ -36,7 +36,10 @@ typedef struct {
     char *text; /* kind==1 增量文本;kind==3 错误文本;kind==2 NULL */
 } app_event_t;
 
-typedef enum { SCREEN_CHOICE, SCREEN_CHAT, SCREEN_SETTINGS, SCREEN_SESSIONS } screen_t;
+typedef enum {
+    SCREEN_CHOICE, SCREEN_CHAT, SCREEN_SETTINGS,
+    SCREEN_SESSIONS, SCREEN_WORKSPACES, SCREEN_WS_SESSIONS, SCREEN_MODELS,
+} screen_t;
 
 static SDL_Window   *g_win   = NULL;
 static SDL_Renderer *g_ren   = NULL;
@@ -62,6 +65,29 @@ static int g_sess_idx = 0;
 static int g_sess_loaded = 0;
 static char g_sess_err[256];
 static int g_sess_from_startup = 0;
+static screen_t g_sess_back = SCREEN_CHAT;
+
+/* 工作区 */
+static harness_workspace_t *g_wss = NULL;
+static size_t g_wss_n = 0;
+static int g_ws_loaded = 0;
+static int g_ws_idx = 0;
+static char g_ws_err[256];
+
+/* 工作区内会话 */
+static harness_session_t *g_wss_sessions = NULL;
+static size_t g_wss_sessions_n = 0;
+static int g_wss_loaded = 0;
+static int g_wss_idx = 0;
+static char g_wss_err[256];
+
+/* 模型选择 */
+static model_option_t *g_models = NULL;
+static size_t g_models_n = 0;
+static int g_models_loaded = 0;
+static int g_model_idx = 0;
+static char g_models_err[256];
+static char g_cur_model[128] = "";
 
 /* 后台请求 */
 static SDL_mutex *g_q_mtx = NULL;
@@ -356,7 +382,7 @@ static void render_chat(void) {
     }
     snprintf(title, sizeof(title), "%s · %s",
              strcmp(g_cfg.backend, "deepseek") == 0 ? "DeepSeek" : "Harness",
-             g_cfg.model ? g_cfg.model : "");
+             g_cur_model[0] ? g_cur_model : (g_cfg.model ? g_cfg.model : ""));
     ts = TTF_RenderUTF8_Blended(g_font_hint, title, COL_ACCENT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -439,8 +465,8 @@ static void render_chat(void) {
 
     const char *hint = g_worker_busy ? "回复中…请稍候    + 退出"
                        : (strcmp(g_cfg.backend, "harness") == 0
-                          ? "A 输入消息    X 会话    Y 设置    + 退出"
-                          : "A 输入消息    X 清屏    Y 设置    + 退出");
+                          ? "A 输入    X 工作区    Y 设置    L 模型    + 退出"
+                          : "A 输入    X 清屏    Y 设置    L 模型    + 退出");
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -621,6 +647,12 @@ static void render_settings(void) {
 /* 前置声明 */
 static void enter_sessions(int from_startup);
 static void render_sessions(void);
+static void enter_workspaces(int from_startup);
+static void render_workspaces(void);
+static void enter_ws_sessions(int ws_idx);
+static void render_ws_sessions(void);
+static void enter_models(void);
+static void render_models(void);
 
 /* ---------- 启动后端选择界面 ---------- */
 
@@ -640,7 +672,7 @@ static void choice_input(u64 kDown) {
         g_cfg.backend = strdup(be);
         config_save(&g_cfg);
         printf("choice: backend=%s\n", g_cfg.backend);
-        if (g_choice_idx == 0) enter_sessions(1); /* Harness:先看会话列表 */
+        if (g_choice_idx == 0) enter_workspaces(1); /* Harness:先看工作区 */
         else g_screen = SCREEN_CHAT;
         g_dirty = 1;
     }
@@ -820,7 +852,7 @@ static void sessions_input(u64 kDown) {
         return;
     }
     if (kDown & HidNpadButton_B) {
-        g_screen = g_sess_from_startup ? SCREEN_CHOICE : SCREEN_CHAT;
+        g_screen = g_sess_from_startup ? SCREEN_CHOICE : g_sess_back;
         g_dirty = 1;
         return;
     }
@@ -971,6 +1003,634 @@ static void render_sessions(void) {
     }
 }
 
+/* ---------- 工作区界面 ---------- */
+
+static void enter_workspaces(int from_startup) {
+    g_sess_from_startup = from_startup; /* 复用:B 返回 */
+    g_ws_loaded = 0;
+    g_ws_idx = 0;
+    g_ws_err[0] = '\0';
+    harness_workspaces_free(g_wss, g_wss_n);
+    g_wss = NULL;
+    g_wss_n = 0;
+    g_screen = SCREEN_WORKSPACES;
+    g_dirty = 1;
+}
+
+static void ws_load(void) {
+    render_workspaces();
+    g_dirty = 0;
+    char err[256] = {0};
+    if (harness_list_workspaces(&g_cfg, &g_wss, &g_wss_n, err, sizeof(err)) != 0) {
+        snprintf(g_ws_err, sizeof(g_ws_err), "%s", err[0] ? err : "加载失败");
+    }
+    g_ws_loaded = 1;
+    g_dirty = 1;
+}
+
+static void ws_input(u64 kDown) {
+    if (kDown & HidNpadButton_Plus) {
+        g_want_exit = 1;
+        return;
+    }
+    if (kDown & HidNpadButton_B) {
+        g_screen = g_sess_from_startup ? SCREEN_CHOICE : SCREEN_CHAT;
+        g_dirty = 1;
+        return;
+    }
+    if (!g_ws_loaded) return;
+    int max_idx = (int)g_wss_n + 2; /* 0=新建会话 1=新建工作区 2..=工作区 +1=全部会话 */
+    if (kDown & HidNpadButton_Down) {
+        if (g_ws_idx < max_idx) g_ws_idx++;
+        g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_Up) {
+        if (g_ws_idx > 0) g_ws_idx--;
+        g_dirty = 1;
+    }
+    if (!(kDown & HidNpadButton_A)) return;
+
+    if (g_ws_idx == 0) {
+        char err[256] = {0};
+        if (harness_new_session_in(&g_cfg, NULL, err, sizeof(err)) == 0) {
+            clear_msgs();
+            add_msg(ROLE_ASSISTANT, "已新建会话。\nA 输入消息;X 工作区;L 模型;+ 退出。", 1);
+            g_screen = SCREEN_CHAT;
+        } else {
+            snprintf(g_ws_err, sizeof(g_ws_err), "%s", err[0] ? err : "新建失败");
+        }
+        g_dirty = 1;
+        return;
+    }
+    if (g_ws_idx == 1) {
+        char path[512] = "";
+        if (textinput_prompt("新工作区:输入已有目录绝对路径",
+                             "C:\\Users\\USER\\Documents\\Codex", 0, 0,
+                             path, sizeof(path)) == 1) {
+            char err[256] = {0};
+            if (harness_create_workspace(&g_cfg, path, err, sizeof(err)) == 0) {
+                g_ws_loaded = 0; /* 重新加载列表 */
+                g_ws_idx = 0;
+                ws_load();
+            } else {
+                snprintf(g_ws_err, sizeof(g_ws_err), "%s", err[0] ? err : "创建失败");
+            }
+        }
+        g_dirty = 1;
+        return;
+    }
+    if (g_ws_idx == max_idx) {
+        g_sess_back = SCREEN_WORKSPACES;
+        enter_sessions(0);
+        return;
+    }
+    enter_ws_sessions(g_ws_idx - 2);
+}
+
+static void render_workspaces(void) {
+    SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
+    SDL_RenderClear(g_ren);
+
+    SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+    SDL_Rect hdr = { 0, 0, WIN_W, HEADER_H };
+    SDL_RenderFillRect(g_ren, &hdr);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+    SDL_Rect hair = { 0, HEADER_H - 1, WIN_W, 1 };
+    SDL_RenderFillRect(g_ren, &hair);
+
+    SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, "工作区", COL_TEXT);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, (HEADER_H - ts->h) / 2, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+    ts = TTF_RenderUTF8_Blended(g_font_hint, "Harness 工作区与会话", COL_TEXT3);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 160, (HEADER_H - ts->h) / 2 + 2, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+
+    const int row_h = 64;
+    int y = HEADER_H + 16;
+
+    if (!g_ws_loaded && !g_ws_err[0]) {
+        ts = TTF_RenderUTF8_Blended(g_font, "正在加载工作区…", COL_TEXT2);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        return;
+    }
+    if (g_ws_err[0]) {
+        ts = TTF_RenderUTF8_Blended(g_font, g_ws_err, COL_RED);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        return;
+    }
+
+    /* 行 0:新建会话;行 1:新建工作区 */
+    const char *rows0[2] = { "＋ 新建会话", "＋ 新建工作区(采纳已有目录)" };
+    for (int i = 0; i < 2; i++) {
+        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
+        if (g_ws_idx == i)
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+        ts = TTF_RenderUTF8_Blended(g_font, rows0[i], COL_BRAND);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        y += row_h + 8;
+    }
+
+    for (size_t i = 0; i < g_wss_n; i++) {
+        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
+        int sel = (int)i + 2 == g_ws_idx;
+        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                       (Sint16)(row.y + row.h), 10,
+                       sel ? COL_SURF2.r : COL_SURF.r,
+                       sel ? COL_SURF2.g : COL_SURF.g,
+                       sel ? COL_SURF2.b : COL_SURF.b, 255);
+
+        char label[200];
+        snprintf(label, sizeof(label), "📁 %s", g_wss[i].title);
+        ts = TTF_RenderUTF8_Blended(g_font, label, COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + 10, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+
+        char meta[128];
+        snprintf(meta, sizeof(meta), "%zu 会话 · %s", g_wss[i].session_count,
+                 g_wss[i].path ? g_wss[i].path : "");
+        ts = TTF_RenderUTF8_Blended(g_font_hint, meta, COL_TEXT3);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + row_h - ts->h - 8, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        y += row_h + 8;
+        if (y > WIN_H - 140) break;
+    }
+
+    /* 全部会话(平铺) */
+    {
+        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
+        int sel = g_ws_idx == (int)g_wss_n + 2;
+        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                       (Sint16)(row.y + row.h), 10,
+                       sel ? COL_SURF2.r : COL_SURF.r,
+                       sel ? COL_SURF2.g : COL_SURF.g,
+                       sel ? COL_SURF2.b : COL_SURF.b, 255);
+        ts = TTF_RenderUTF8_Blended(g_font, "全部会话(平铺)", COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+    }
+
+    const char *hint = "↑↓ 选择    A 打开/新建    B 返回    + 退出";
+    ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, WIN_H - 48, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+}
+
+/* ---------- 工作区内会话 ---------- */
+
+static int g_ws_sel = -1;
+
+static void enter_ws_sessions(int ws_idx) {
+    g_ws_sel = ws_idx;
+    g_wss_loaded = 0;
+    g_wss_idx = 0;
+    g_wss_err[0] = '\0';
+    harness_sessions_free(g_wss_sessions, g_wss_sessions_n);
+    g_wss_sessions = NULL;
+    g_wss_sessions_n = 0;
+    g_screen = SCREEN_WS_SESSIONS;
+    g_dirty = 1;
+}
+
+static void ws_sessions_load(void) {
+    render_ws_sessions();
+    g_dirty = 0;
+    char err[256] = {0};
+    harness_session_t *all = NULL;
+    size_t all_n = 0;
+    if (harness_list_sessions(&g_cfg, &all, &all_n, err, sizeof(err)) != 0) {
+        snprintf(g_wss_err, sizeof(g_wss_err), "%s", err[0] ? err : "加载失败");
+    } else {
+        const char *path = (g_ws_sel >= 0 && (size_t)g_ws_sel < g_wss_n)
+                               ? g_wss[g_ws_sel].path : NULL;
+        size_t k = 0;
+        harness_session_t *sel = calloc(all_n ? all_n : 1, sizeof(*sel));
+        if (sel) {
+            for (size_t i = 0; i < all_n; i++) {
+                if (path && (!all[i].cwd || strcmp(all[i].cwd, path) != 0)) continue;
+                sel[k].session_id = all[i].session_id;
+                sel[k].title = all[i].title;
+                sel[k].cwd = all[i].cwd;
+                sel[k].running = all[i].running;
+                sel[k].updated_at = all[i].updated_at;
+                all[i].session_id = NULL;
+                all[i].title = NULL;
+                all[i].cwd = NULL;
+                k++;
+            }
+            g_wss_sessions = sel;
+            g_wss_sessions_n = k;
+        } else {
+            snprintf(g_wss_err, sizeof(g_wss_err), "内存不足");
+        }
+        harness_sessions_free(all, all_n);
+    }
+    g_wss_loaded = 1;
+    g_dirty = 1;
+}
+
+static void ws_sessions_pick(int row_idx) {
+    char err[256] = {0};
+    if (row_idx == 0) {
+        const char *wid = (g_ws_sel >= 0 && (size_t)g_ws_sel < g_wss_n)
+                              ? g_wss[g_ws_sel].workspace_id : NULL;
+        if (harness_new_session_in(&g_cfg, wid, err, sizeof(err)) != 0) {
+            snprintf(g_wss_err, sizeof(g_wss_err), "%s", err[0] ? err : "新建失败");
+            g_dirty = 1;
+            return;
+        }
+        clear_msgs();
+        add_msg(ROLE_ASSISTANT, "已在本工作区新建会话。\nA 输入消息开始。", 1);
+        g_screen = SCREEN_CHAT;
+        g_dirty = 1;
+        return;
+    }
+    if (harness_use_session(&g_cfg, g_wss_sessions[row_idx - 1].session_id,
+                            err, sizeof(err)) != 0) {
+        snprintf(g_wss_err, sizeof(g_wss_err), "%s", err[0] ? err : "切换失败");
+        g_dirty = 1;
+        return;
+    }
+    clear_msgs();
+    chat_message_t *msgs = NULL;
+    size_t n = 0;
+    if (harness_fetch_history(&g_cfg, &msgs, &n, err, sizeof(err)) == 0) {
+        for (size_t i = 0; i < n; i++)
+            add_msg(msgs[i].role, msgs[i].content ? msgs[i].content : "", 1);
+        for (size_t i = 0; i < n; i++) free(msgs[i].content);
+        free(msgs);
+    } else {
+        add_msg(ROLE_ASSISTANT, "历史加载失败,从新消息开始。", 1);
+    }
+    if (g_nmsgs == 0)
+        add_msg(ROLE_ASSISTANT, "(该会话暂无聊天记录)\n按 A 开始输入。", 1);
+    g_screen = SCREEN_CHAT;
+    g_dirty = 1;
+}
+
+static void ws_sessions_input(u64 kDown) {
+    if (kDown & HidNpadButton_Plus) {
+        g_want_exit = 1;
+        return;
+    }
+    if (kDown & HidNpadButton_B) {
+        enter_workspaces(g_sess_from_startup);
+        return;
+    }
+    if (!g_wss_loaded) return;
+    int max_idx = (int)g_wss_sessions_n;
+    if (kDown & HidNpadButton_Down) {
+        if (g_wss_idx < max_idx) g_wss_idx++;
+        g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_Up) {
+        if (g_wss_idx > 0) g_wss_idx--;
+        g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_A) ws_sessions_pick(g_wss_idx);
+}
+
+static void render_ws_sessions(void) {
+    SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
+    SDL_RenderClear(g_ren);
+
+    SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+    SDL_Rect hdr = { 0, 0, WIN_W, HEADER_H };
+    SDL_RenderFillRect(g_ren, &hdr);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+    SDL_Rect hair = { 0, HEADER_H - 1, WIN_W, 1 };
+    SDL_RenderFillRect(g_ren, &hair);
+
+    char hdr_title[200];
+    if (g_ws_sel >= 0 && (size_t)g_ws_sel < g_wss_n)
+        snprintf(hdr_title, sizeof(hdr_title), "📁 %s", g_wss[g_ws_sel].title);
+    else
+        snprintf(hdr_title, sizeof(hdr_title), "工作区会话");
+    SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, hdr_title, COL_TEXT);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, (HEADER_H - ts->h) / 2, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+
+    const int row_h = 64;
+    int y = HEADER_H + 16;
+
+    if (!g_wss_loaded && !g_wss_err[0]) {
+        ts = TTF_RenderUTF8_Blended(g_font, "正在加载会话…", COL_TEXT2);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        return;
+    }
+    if (g_wss_err[0]) {
+        ts = TTF_RenderUTF8_Blended(g_font, g_wss_err, COL_RED);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        return;
+    }
+
+    {
+        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
+        if (g_wss_idx == 0)
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+        ts = TTF_RenderUTF8_Blended(g_font, "＋ 在此工作区新建会话", COL_BRAND);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        y += row_h + 8;
+    }
+
+    for (size_t i = 0; i < g_wss_sessions_n; i++) {
+        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
+        int sel = (int)i + 1 == g_wss_idx;
+        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                       (Sint16)(row.y + row.h), 10,
+                       sel ? COL_SURF2.r : COL_SURF.r,
+                       sel ? COL_SURF2.g : COL_SURF.g,
+                       sel ? COL_SURF2.b : COL_SURF.b, 255);
+        ts = TTF_RenderUTF8_Blended(g_font, g_wss_sessions[i].title, COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + 10, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        char meta[64];
+        if (g_wss_sessions[i].running) snprintf(meta, sizeof(meta), "● 运行中");
+        else fmt_time(g_wss_sessions[i].updated_at, meta, sizeof(meta));
+        ts = TTF_RenderUTF8_Blended(g_font_hint, meta,
+                                    g_wss_sessions[i].running ? COL_GREEN : COL_TEXT3);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + row.w - ts->w - 20, row.y + (row_h - ts->h) / 2,
+                           ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        y += row_h + 8;
+        if (y > WIN_H - 100) break;
+    }
+
+    const char *hint = "↑↓ 选择    A 打开/新建    B 返回工作区    + 退出";
+    ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, WIN_H - 48, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+}
+
+/* ---------- 模型选择界面 ---------- */
+
+static void enter_models(void) {
+    g_models_loaded = 0;
+    g_model_idx = 0;
+    g_models_err[0] = '\0';
+    backend_models_free(g_models, g_models_n);
+    g_models = NULL;
+    g_models_n = 0;
+    g_screen = SCREEN_MODELS;
+    g_dirty = 1;
+}
+
+static void models_load(void) {
+    render_models();
+    g_dirty = 0;
+    char err[256] = {0};
+    if (backend_list_models(&g_cfg, &g_models, &g_models_n,
+                            g_cur_model, sizeof(g_cur_model),
+                            err, sizeof(err)) != 0) {
+        snprintf(g_models_err, sizeof(g_models_err), "%s", err[0] ? err : "加载失败");
+    } else {
+        /* 高亮当前模型 */
+        g_model_idx = 0;
+        for (size_t i = 0; i < g_models_n; i++) {
+            if (strcmp(g_models[i].id, g_cur_model) == 0) {
+                g_model_idx = (int)i;
+                break;
+            }
+        }
+    }
+    g_models_loaded = 1;
+    g_dirty = 1;
+}
+
+static void models_input(u64 kDown) {
+    if (kDown & HidNpadButton_Plus) {
+        g_want_exit = 1;
+        return;
+    }
+    if (kDown & HidNpadButton_B) {
+        g_screen = SCREEN_CHAT;
+        g_dirty = 1;
+        return;
+    }
+    if (!g_models_loaded || g_models_n == 0) return;
+    if (kDown & HidNpadButton_Down) {
+        if (g_model_idx < (int)g_models_n - 1) g_model_idx++;
+        g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_Up) {
+        if (g_model_idx > 0) g_model_idx--;
+        g_dirty = 1;
+    }
+    if (!(kDown & HidNpadButton_A)) return;
+
+    char err[256] = {0};
+    if (backend_apply_model(&g_cfg, g_models[g_model_idx].id, err, sizeof(err)) != 0) {
+        snprintf(g_models_err, sizeof(g_models_err), "%s", err[0] ? err : "切换失败");
+        g_dirty = 1;
+        return;
+    }
+    snprintf(g_cur_model, sizeof(g_cur_model), "%s", g_models[g_model_idx].id);
+    if (strcmp(g_cfg.backend, "deepseek") == 0) config_save(&g_cfg);
+    printf("models: selected %s\n", g_cur_model);
+    g_screen = SCREEN_CHAT;
+    g_dirty = 1;
+}
+
+static void render_models(void) {
+    SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
+    SDL_RenderClear(g_ren);
+
+    SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+    SDL_Rect hdr = { 0, 0, WIN_W, HEADER_H };
+    SDL_RenderFillRect(g_ren, &hdr);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+    SDL_Rect hair = { 0, HEADER_H - 1, WIN_W, 1 };
+    SDL_RenderFillRect(g_ren, &hair);
+
+    SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, "选择模型", COL_TEXT);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, (HEADER_H - ts->h) / 2, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+    char sub[200];
+    snprintf(sub, sizeof(sub), "当前: %s · %s", g_cur_model,
+             strcmp(g_cfg.backend, "deepseek") == 0 ? "DeepSeek(全局)" : "Harness(本会话)");
+    ts = TTF_RenderUTF8_Blended(g_font_hint, sub, COL_TEXT3);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 200, (HEADER_H - ts->h) / 2 + 2, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+
+    const int row_h = 64;
+    int y = HEADER_H + 16;
+
+    if (!g_models_loaded && !g_models_err[0]) {
+        ts = TTF_RenderUTF8_Blended(g_font, "正在读取模型列表…", COL_TEXT2);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        return;
+    }
+    if (g_models_err[0]) {
+        ts = TTF_RenderUTF8_Blended(g_font, g_models_err, COL_RED);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        return;
+    }
+
+    for (size_t i = 0; i < g_models_n; i++) {
+        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
+        int sel = (int)i == g_model_idx;
+        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                       (Sint16)(row.y + row.h), 10,
+                       sel ? COL_SURF2.r : COL_SURF.r,
+                       sel ? COL_SURF2.g : COL_SURF.g,
+                       sel ? COL_SURF2.b : COL_SURF.b, 255);
+        if (strcmp(g_models[i].id, g_cur_model) == 0)
+            roundedRectangleRGBA(g_ren, (Sint16)row.x, (Sint16)row.y,
+                                 (Sint16)(row.x + row.w), (Sint16)(row.y + row.h), 10,
+                                 COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
+
+        char label[200];
+        snprintf(label, sizeof(label), "%s%s", g_models[i].name,
+                 strcmp(g_models[i].id, g_cur_model) == 0 ? "  ✓ 当前" : "");
+        ts = TTF_RenderUTF8_Blended(g_font, label,
+                                    strcmp(g_models[i].id, g_cur_model) == 0
+                                        ? COL_BRAND : COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + 10, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        char meta[160];
+        if (g_models[i].provider && g_models[i].provider[0])
+            snprintf(meta, sizeof(meta), "%s · %s", g_models[i].provider, g_models[i].id);
+        else
+            snprintf(meta, sizeof(meta), "%s", g_models[i].id);
+        ts = TTF_RenderUTF8_Blended(g_font_hint, meta, COL_TEXT3);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + row_h - ts->h - 8, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        y += row_h + 8;
+        if (y > WIN_H - 100) break;
+    }
+
+    const char *hint = "↑↓ 选择    A 应用    B 返回    + 退出";
+    ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, WIN_H - 48, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+}
+
 /* ---------- 生命周期 ---------- */
 
 int app_init(void) {
@@ -1007,6 +1667,7 @@ int app_init(void) {
     printf("app: backend=%s model=%s base=%s\n", g_cfg.backend, g_cfg.model,
            g_cfg.harness_base_url);
     g_choice_idx = (strcmp(g_cfg.backend, "deepseek") == 0) ? 1 : 0;
+    snprintf(g_cur_model, sizeof(g_cur_model), "%s", g_cfg.model ? g_cfg.model : "");
 
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     padInitializeDefault(&g_pad);
@@ -1035,6 +1696,15 @@ int app_frame(void) {
     } else if (g_screen == SCREEN_SESSIONS) {
         if (!g_sess_loaded && !g_sess_err[0]) sessions_load();
         sessions_input(kDown);
+    } else if (g_screen == SCREEN_WORKSPACES) {
+        if (!g_ws_loaded && !g_ws_err[0]) ws_load();
+        ws_input(kDown);
+    } else if (g_screen == SCREEN_WS_SESSIONS) {
+        if (!g_wss_loaded && !g_wss_err[0]) ws_sessions_load();
+        ws_sessions_input(kDown);
+    } else if (g_screen == SCREEN_MODELS) {
+        if (!g_models_loaded && !g_models_err[0]) models_load();
+        models_input(kDown);
     } else {
         if ((kDown & HidNpadButton_A) && !g_worker_busy) {
             if (textinput_prompt("输入消息", NULL, 1, 0, g_input, sizeof(g_input)) == 1) {
@@ -1044,9 +1714,12 @@ int app_frame(void) {
             }
         }
         if ((kDown & HidNpadButton_X) && !g_worker_busy) {
-            if (strcmp(g_cfg.backend, "harness") == 0) enter_sessions(0);
+            if (strcmp(g_cfg.backend, "harness") == 0) enter_workspaces(0);
             else clear_msgs();
             g_dirty = 1;
+        }
+        if ((kDown & HidNpadButton_L) && !g_worker_busy) {
+            enter_models();
         }
         if ((kDown & HidNpadButton_Y) && !g_worker_busy) {
             g_set_idx = 0;
@@ -1061,6 +1734,9 @@ int app_frame(void) {
         if (g_screen == SCREEN_CHOICE) render_choice();
         else if (g_screen == SCREEN_SETTINGS) render_settings();
         else if (g_screen == SCREEN_SESSIONS) render_sessions();
+        else if (g_screen == SCREEN_WORKSPACES) render_workspaces();
+        else if (g_screen == SCREEN_WS_SESSIONS) render_ws_sessions();
+        else if (g_screen == SCREEN_MODELS) render_models();
         else render_chat();
         g_dirty = 0;
     }
@@ -1074,6 +1750,15 @@ void app_exit(void) {
     harness_sessions_free(g_sessions, g_sessions_n);
     g_sessions = NULL;
     g_sessions_n = 0;
+    harness_workspaces_free(g_wss, g_wss_n);
+    g_wss = NULL;
+    g_wss_n = 0;
+    harness_sessions_free(g_wss_sessions, g_wss_sessions_n);
+    g_wss_sessions = NULL;
+    g_wss_sessions_n = 0;
+    backend_models_free(g_models, g_models_n);
+    g_models = NULL;
+    g_models_n = 0;
     app_event_t ev;
     while (pop_event(&ev)) free(ev.text);
     if (g_q_mtx) SDL_DestroyMutex(g_q_mtx);

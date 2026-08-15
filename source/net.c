@@ -139,6 +139,38 @@ int net_post_json(const char *url, const char *body, net_buffer_t *out,
     return 0;
 }
 
+int net_get_json(const char *url, const char *const *headers, size_t n_headers,
+                 net_buffer_t *out, long *http_code, char *err, size_t errsz) {
+    if (err && errsz) err[0] = '\0';
+    memset(out, 0, sizeof(*out));
+
+    CURL *curl = new_easy(url, err, errsz);
+    if (!curl) return -1;
+
+    growbuf_t buf = {0};
+    struct curl_slist *hdrs = NULL;
+    for (size_t i = 0; i < n_headers; i++) hdrs = curl_slist_append(hdrs, headers[i]);
+
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, buf_write);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 30000L);
+
+    CURLcode rc = curl_easy_perform(curl);
+    if (http_code) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, http_code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+
+    out->data = buf.data ? buf.data : strdup("");
+    out->len = buf.len;
+    if (rc != CURLE_OK) {
+        if (err && errsz) snprintf(err, errsz, "网络错误: %s", curl_easy_strerror(rc));
+        return -1;
+    }
+    return 0;
+}
+
 int net_sse(const char *url, const char *method, const char *body,
             const char *const *headers, size_t n_headers,
             net_sse_line_cb on_line, void *userdata, char *err, size_t errsz) {
