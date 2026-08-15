@@ -498,7 +498,7 @@ static const char *set_label(int i) {
         case 0: return "后端";
         case 1: return "Harness 地址";
         case 2: return "DeepSeek 地址";
-        case 3: return "API Key";
+        case 3: return "API Key(key.txt 优先)";
         case 4: return "模型";
         case 5: return "思考模式";
         case 6: return "系统提示词";

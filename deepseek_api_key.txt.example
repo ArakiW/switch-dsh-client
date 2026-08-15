@@ -1,0 +1,2 @@
+(把本文件改名为 deepseek_api_key.txt,内容只填你的 API Key 一行,放到 SD 卡 sdmc:/switch/switch-dsh-client/ 目录。
+应用启动时自动读取;设置界面里修改 Key 后也会同步写回该文件。)

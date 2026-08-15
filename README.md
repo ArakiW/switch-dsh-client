@@ -92,12 +92,22 @@ HTTPS 走 Switch 系统 SSL(系统 CA),无需配置证书。
 | `backend` | `"harness"` 或 `"deepseek"` |
 | `harness_base_url` | 指向 dsh-bridge,如 `http://192.168.1.10:8765` |
 | `deepseek_base_url` | 默认 `https://api.deepseek.com` |
-| `deepseek_api_key` | DeepSeek API Key |
+| `deepseek_api_key` | DeepSeek API Key(见下方 key.txt 快捷方式) |
 | `model` | 模型名(默认 `deepseek-v4-pro`) |
 | `deepseek_thinking` | `"enabled"` / `"disabled"` |
 | `system_prompt` | 系统提示词(可空) |
 
 加载顺序:SD 卡 config.json → 内置默认值。
+
+### API Key 免手输:独立文本文件
+
+在 Switch 上敲 API Key 太麻烦,可以**在电脑上直接把 Key 写进一个文本文件**:
+
+1. 在 SD 卡 `sdmc:/switch/switch-dsh-client/` 目录新建 `deepseek_api_key.txt`,内容就是一行 API Key(前后空白/换行会被自动忽略;仓库里有 `deepseek_api_key.txt.example` 参考)
+2. 应用每次启动自动读取;**该文件存在且非空时优先于 config.json 里的值**
+3. 设置界面里的"API Key"项仍然可以修改(修改后会自动同步写回 key.txt);PC 上手动改 key.txt 后,重启应用即生效
+
+> 提示:key.txt 只保存在你自己的 SD 卡上,不会同步到别处。**不要把这个文件提交到 git 或发给别人。**
 
 ## 操作
 

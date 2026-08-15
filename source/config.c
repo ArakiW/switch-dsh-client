@@ -5,10 +5,12 @@
 
 #include "config.h"
 #include "cJSON.h"
+#include "util.h"
 
 #define CFG_DIR        "sdmc:/switch/switch-dsh-client"
 #define CFG_PATH       CFG_DIR "/config.json"
 #define CFG_PATH_ROMFS "romfs:/config.json"
+#define KEY_FILE       CFG_DIR "/deepseek_api_key.txt"
 #define CFG_MAX_BYTES  (1024 * 1024)
 
 static char *dupstr(const char *s) {
@@ -42,6 +44,22 @@ static const char *json_str(const cJSON *root, const char *key) {
     const cJSON *it = cJSON_GetObjectItemCaseSensitive(root, key);
     if (!cJSON_IsString(it)) return NULL;
     return it->valuestring;
+}
+
+/*
+ * 读独立的 API Key 文本文件(便于在 PC 上直接编辑,免去在 Switch 上敲键盘)。
+ * 内容取首尾空白后返回;文件不存在或为空时返回 NULL。
+ */
+static char *read_key_file(void) {
+    size_t size = 0;
+    char *raw = read_file(KEY_FILE, &size);
+    if (!raw) return NULL;
+    char *t = str_trim(raw);
+    if (!t || !t[0]) {
+        free(raw);
+        return NULL;
+    }
+    return t;
 }
 
 void config_free(backend_config_t *cfg) {
@@ -94,6 +112,13 @@ int config_load(backend_config_t *cfg) {
     if ((s = json_str(root, "system_prompt")))     { free(cfg->system_prompt);     cfg->system_prompt     = dupstr(s); }
 
     cJSON_Delete(root);
+
+    /* 独立的 key.txt 优先:存在且非空则覆盖 config.json 里的值 */
+    char *keyfile = read_key_file();
+    if (keyfile) {
+        free(cfg->deepseek_api_key);
+        cfg->deepseek_api_key = keyfile;
+    }
     return 0;
 }
 
@@ -119,6 +144,14 @@ int config_save(const backend_config_t *cfg) {
     fwrite(pretty, 1, strlen(pretty), f);
     fclose(f);
     free(pretty);
+
+    /* 同步 API Key 到独立文本文件(设置里改完也能在 PC 上看到/再编辑) */
+    FILE *kf = fopen(KEY_FILE, "wb");
+    if (kf) {
+        const char *key = cfg->deepseek_api_key ? cfg->deepseek_api_key : "";
+        fwrite(key, 1, strlen(key), kf);
+        fclose(kf);
+    }
     return 0;
 }
 
