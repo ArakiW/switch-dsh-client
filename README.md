@@ -6,6 +6,7 @@ Nintendo Switch 自制程序(homebrew):DeepSeek AI 聊天客户端。libnx + SDL
 
 - 文字聊天,SSE 流式渲染(逐字显示)
 - 双后端切换:① Harness(经 dsh-bridge)② DeepSeek 官方 API
+- **启动时后端二选一选择界面**(每次打开 APP 先选后端,选择自动保存)
 - 系统软键盘 swkbd,原生简体中文拼音输入(`SwkbdType_ZhHans`)
 - 设备端设置界面(后端/地址/API Key/模型/思考模式/系统提示词,保存到 SD 卡)
 - Harness 模式会话 ID 持久化(重启续聊)
@@ -59,15 +60,18 @@ GitHub Actions 见 `.github/workflows/build.yml`(devkitpro/devkitarm 镜像自�
 
 ### 方式 A:连本机 DeepSeek Harness(推荐,复用现有会话/模型)
 
-在跑 DSH 的电脑上启动桥接(零依赖 Node):
+**一键启动桥接(任选其一):**
+
+1. **双击 `start-bridge.bat`**:自动启动桥接并显示本机局域网 IP(把 `http://<IP>:8765` 填到 Switch);关窗口即停止。
+2. **本网页侧栏底部按钮**(动态插件 `dsh-bridge launcher`):绿色 ● = 运行中,点击切换启停。插件需要你在界面上批准后生效;DSH 重启后插件消失,.bat 始终可用。
+
+也可以手动运行:
 
 ```bash
 node bridge/dsh-bridge.js [--dsh http://127.0.0.1:3080] [--host 0.0.0.0] [--port 8765]
 ```
 
-Switch 设置界面里:
-- 后端选 `Harness`
-- Harness 地址填 `http://<电脑局域网IP>:8765`
+Switch 端:打开 APP 在启动界面选 `Harness`,设置界面里 Harness 地址填 `http://<电脑局域网IP>:8765`。
 
 > 安全提示:DSH API 无鉴权且可执行远程代码,桥接**只应在可信局域网**运行,勿暴露公网。Windows 防火墙如拦截,放行 Node 的 8765 端口即可。
 
@@ -97,14 +101,14 @@ HTTPS 走 Switch 系统 SSL(系统 CA),无需配置证书。
 
 ## 操作
 
-| 按键 | 聊天界面 | 设置界面 |
-| --- | --- | --- |
-| A | 输入消息(中文拼音键盘) | 修改/切换当前项 |
-| X | 清屏 | — |
-| Y | 打开设置 | — |
-| B | — | 保存并返回 |
-| ↑/↓ | — | 选择设置项 |
-| + | 退出 | 退出 |
+| 按键 | 启动选择界面 | 聊天界面 | 设置界面 |
+| --- | --- | --- | --- |
+| A | 确定所选后端 | 输入消息(中文拼音键盘) | 修改/切换当前项 |
+| X | — | 清屏 | — |
+| Y | — | 打开设置 | — |
+| B | — | — | 保存并返回 |
+| ↑/↓/←/→ | 切换后端 | — | 选择设置项 |
+| + | 退出 | 退出 | 退出 |
 
 ## 测试状态
 

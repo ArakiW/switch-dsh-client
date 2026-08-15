@@ -33,7 +33,7 @@ typedef struct {
     char *text; /* kind==1 增量文本;kind==3 错误文本;kind==2 NULL */
 } app_event_t;
 
-typedef enum { SCREEN_CHAT, SCREEN_SETTINGS } screen_t;
+typedef enum { SCREEN_CHOICE, SCREEN_CHAT, SCREEN_SETTINGS } screen_t;
 
 static SDL_Window   *g_win   = NULL;
 static SDL_Renderer *g_ren   = NULL;
@@ -48,8 +48,9 @@ static PadState g_pad;
 static char g_input[4096];
 static int g_want_exit = 0;
 static int g_dirty = 1;
-static screen_t g_screen = SCREEN_CHAT;
+static screen_t g_screen = SCREEN_CHOICE;
 static int g_set_idx = 0;
+static int g_choice_idx = 0;
 
 /* 后台请求 */
 static SDL_mutex *g_q_mtx = NULL;
@@ -578,6 +579,111 @@ static void render_settings(void) {
     }
 }
 
+/* ---------- 启动后端选择界面 ---------- */
+
+static void choice_input(u64 kDown) {
+    if (kDown & HidNpadButton_Plus) {
+        g_want_exit = 1;
+        return;
+    }
+    if ((kDown & (HidNpadButton_Up | HidNpadButton_Down)) ||
+        (kDown & (HidNpadButton_Left | HidNpadButton_Right))) {
+        g_choice_idx = 1 - g_choice_idx;
+        g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_A) {
+        const char *be = g_choice_idx == 0 ? "harness" : "deepseek";
+        free(g_cfg.backend);
+        g_cfg.backend = strdup(be);
+        config_save(&g_cfg);
+        printf("choice: backend=%s\n", g_cfg.backend);
+        g_screen = SCREEN_CHAT;
+        g_dirty = 1;
+    }
+}
+
+static void render_choice(void) {
+    SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
+    SDL_RenderClear(g_ren);
+
+    SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, "选择后端", COL_TEXT);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { (WIN_W - ts->w) / 2, 60, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+
+    const char *titles[2] = { "Harness(局域网)", "DeepSeek(官方 API)" };
+    const char *descs[2] = {
+        "连接本机 DeepSeek Harness",
+        "直连 api.deepseek.com",
+    };
+    const char *subs[2] = {
+        "需要 PC 端运行 dsh-bridge 桥接",
+        "需要 API Key(设置界面填写)",
+    };
+
+    for (int i = 0; i < 2; i++) {
+        SDL_Rect card = { 140, 200 + i * 190, WIN_W - 280, 160 };
+        if (i == g_choice_idx) {
+            SDL_SetRenderDrawColor(g_ren, 52, 88, 140, 255);
+        } else {
+            SDL_SetRenderDrawColor(g_ren, COL_ASST.r, COL_ASST.g, COL_ASST.b, 255);
+        }
+        SDL_RenderFillRect(g_ren, &card);
+
+        /* 选中标记 */
+        ts = TTF_RenderUTF8_Blended(g_font_title,
+                                    i == g_choice_idx ? "▶" : "  ", COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { card.x + 28, card.y + 20, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+
+        ts = TTF_RenderUTF8_Blended(g_font, titles[i], COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { card.x + 84, card.y + 16, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+
+        ts = TTF_RenderUTF8_Blended(g_font_hint, descs[i], COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { card.x + 84, card.y + 66, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+
+        ts = TTF_RenderUTF8_Blended(g_font_hint, subs[i], COL_HINT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { card.x + 84, card.y + 108, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+    }
+
+    const char *hint = "↑↓/←→ 选择    A 确定    + 退出";
+    ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { (WIN_W - ts->w) / 2, WIN_H - 56, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+}
+
 /* ---------- 生命周期 ---------- */
 
 int app_init(void) {
@@ -613,6 +719,7 @@ int app_init(void) {
     config_load(&g_cfg);
     printf("app: backend=%s model=%s base=%s\n", g_cfg.backend, g_cfg.model,
            g_cfg.harness_base_url);
+    g_choice_idx = (strcmp(g_cfg.backend, "deepseek") == 0) ? 1 : 0;
 
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     padInitializeDefault(&g_pad);
@@ -634,7 +741,9 @@ int app_frame(void) {
     if (kDown & HidNpadButton_Plus) g_want_exit = 1;
     if (g_want_exit) return -1;
 
-    if (g_screen == SCREEN_SETTINGS) {
+    if (g_screen == SCREEN_CHOICE) {
+        choice_input(kDown);
+    } else if (g_screen == SCREEN_SETTINGS) {
         settings_input(kDown);
     } else {
         if ((kDown & HidNpadButton_A) && !g_worker_busy) {
@@ -662,7 +771,8 @@ int app_frame(void) {
     drain_queue();
 
     if (g_dirty) {
-        if (g_screen == SCREEN_SETTINGS) render_settings();
+        if (g_screen == SCREEN_CHOICE) render_choice();
+        else if (g_screen == SCREEN_SETTINGS) render_settings();
         else render_chat();
         g_dirty = 0;
     }
