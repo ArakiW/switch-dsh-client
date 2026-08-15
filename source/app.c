@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <SDL.h>
 #include <SDL_ttf.h>
@@ -9,6 +10,7 @@
 
 #include "app.h"
 #include "backend.h"
+#include "backend_harness.h"
 #include "config.h"
 #include "textinput.h"
 #include "util.h"
@@ -34,7 +36,7 @@ typedef struct {
     char *text; /* kind==1 增量文本;kind==3 错误文本;kind==2 NULL */
 } app_event_t;
 
-typedef enum { SCREEN_CHOICE, SCREEN_CHAT, SCREEN_SETTINGS } screen_t;
+typedef enum { SCREEN_CHOICE, SCREEN_CHAT, SCREEN_SETTINGS, SCREEN_SESSIONS } screen_t;
 
 static SDL_Window   *g_win   = NULL;
 static SDL_Renderer *g_ren   = NULL;
@@ -52,6 +54,14 @@ static int g_dirty = 1;
 static screen_t g_screen = SCREEN_CHOICE;
 static int g_set_idx = 0;
 static int g_choice_idx = 0;
+
+/* 会话列表 */
+static harness_session_t *g_sessions = NULL;
+static size_t g_sessions_n = 0;
+static int g_sess_idx = 0;
+static int g_sess_loaded = 0;
+static char g_sess_err[256];
+static int g_sess_from_startup = 0;
 
 /* 后台请求 */
 static SDL_mutex *g_q_mtx = NULL;
@@ -428,7 +438,9 @@ static void render_chat(void) {
     SDL_RenderFillRect(g_ren, &fhair);
 
     const char *hint = g_worker_busy ? "回复中…请稍候    + 退出"
-                                     : "A 输入消息    X 清屏    Y 设置    + 退出";
+                       : (strcmp(g_cfg.backend, "harness") == 0
+                          ? "A 输入消息    X 会话    Y 设置    + 退出"
+                          : "A 输入消息    X 清屏    Y 设置    + 退出");
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -606,6 +618,10 @@ static void render_settings(void) {
     }
 }
 
+/* 前置声明 */
+static void enter_sessions(int from_startup);
+static void render_sessions(void);
+
 /* ---------- 启动后端选择界面 ---------- */
 
 static void choice_input(u64 kDown) {
@@ -624,7 +640,8 @@ static void choice_input(u64 kDown) {
         g_cfg.backend = strdup(be);
         config_save(&g_cfg);
         printf("choice: backend=%s\n", g_cfg.backend);
-        g_screen = SCREEN_CHAT;
+        if (g_choice_idx == 0) enter_sessions(1); /* Harness:先看会话列表 */
+        else g_screen = SCREEN_CHAT;
         g_dirty = 1;
     }
 }
@@ -721,6 +738,239 @@ static void render_choice(void) {
     }
 }
 
+/* ---------- 会话列表界面 ---------- */
+
+static void clear_msgs(void) {
+    while (g_nmsgs > 0) {
+        g_nmsgs--;
+        free(g_msgs[g_nmsgs].text);
+        g_msgs[g_nmsgs].text = NULL;
+    }
+}
+
+static void enter_sessions(int from_startup) {
+    g_sess_from_startup = from_startup;
+    g_sess_loaded = 0;
+    g_sess_idx = 0;
+    g_sess_err[0] = '\0';
+    harness_sessions_free(g_sessions, g_sessions_n);
+    g_sessions = NULL;
+    g_sessions_n = 0;
+    g_screen = SCREEN_SESSIONS;
+    g_dirty = 1;
+}
+
+static void fmt_time(long long epoch_ms, char *out, size_t outsz) {
+    time_t t = (time_t)(epoch_ms / 1000);
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    snprintf(out, outsz, "%02d-%02d %02d:%02d",
+             tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+}
+
+static void sessions_load(void) {
+    render_sessions(); /* 先渲染加载态 */
+    g_dirty = 0;
+    char err[256] = {0};
+    if (harness_list_sessions(&g_cfg, &g_sessions, &g_sessions_n,
+                              err, sizeof(err)) != 0) {
+        snprintf(g_sess_err, sizeof(g_sess_err), "%s", err[0] ? err : "加载失败");
+    }
+    g_sess_loaded = 1;
+    g_dirty = 1;
+}
+
+static void sessions_pick(void) {
+    char err[256] = {0};
+    const char *sid = NULL;
+    if (g_sess_idx > 0 && (size_t)g_sess_idx <= g_sessions_n)
+        sid = g_sessions[g_sess_idx - 1].session_id;
+
+    if (harness_use_session(&g_cfg, sid, err, sizeof(err)) != 0) {
+        snprintf(g_sess_err, sizeof(g_sess_err), "%s", err[0] ? err : "切换失败");
+        g_dirty = 1;
+        return;
+    }
+
+    clear_msgs();
+    if (sid) {
+        chat_message_t *msgs = NULL;
+        size_t n = 0;
+        if (harness_fetch_history(&g_cfg, &msgs, &n, err, sizeof(err)) == 0) {
+            for (size_t i = 0; i < n; i++)
+                add_msg(msgs[i].role, msgs[i].content ? msgs[i].content : "", 1);
+            for (size_t i = 0; i < n; i++) free(msgs[i].content);
+            free(msgs);
+        } else {
+            add_msg(ROLE_ASSISTANT, "历史加载失败,从新消息开始。", 1);
+        }
+        if (g_nmsgs == 0)
+            add_msg(ROLE_ASSISTANT, "(该会话暂无聊天记录)\n按 A 开始输入。", 1);
+    } else {
+        add_msg(ROLE_ASSISTANT,
+                "已新建会话。\nA 输入消息;X 切换会话;Y 设置;+ 退出。", 1);
+    }
+    g_screen = SCREEN_CHAT;
+    g_dirty = 1;
+}
+
+static void sessions_input(u64 kDown) {
+    if (kDown & HidNpadButton_Plus) {
+        g_want_exit = 1;
+        return;
+    }
+    if (kDown & HidNpadButton_B) {
+        g_screen = g_sess_from_startup ? SCREEN_CHOICE : SCREEN_CHAT;
+        g_dirty = 1;
+        return;
+    }
+    if (!g_sess_loaded) return;
+    int max_idx = (int)g_sessions_n; /* 0 = 新建会话 */
+    if (kDown & HidNpadButton_Down) {
+        if (g_sess_idx < max_idx) g_sess_idx++;
+        g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_Up) {
+        if (g_sess_idx > 0) g_sess_idx--;
+        g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_A) sessions_pick();
+}
+
+static void render_sessions(void) {
+    SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
+    SDL_RenderClear(g_ren);
+
+    SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+    SDL_Rect hdr = { 0, 0, WIN_W, HEADER_H };
+    SDL_RenderFillRect(g_ren, &hdr);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+    SDL_Rect hair = { 0, HEADER_H - 1, WIN_W, 1 };
+    SDL_RenderFillRect(g_ren, &hair);
+
+    SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, "会话", COL_TEXT);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, (HEADER_H - ts->h) / 2, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+    ts = TTF_RenderUTF8_Blended(g_font_hint, "电脑端 Harness 的会话列表", COL_TEXT3);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 160, (HEADER_H - ts->h) / 2 + 2, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+
+    const int row_h = 64;
+    int y = HEADER_H + 16;
+
+    if (!g_sess_loaded && !g_sess_err[0]) {
+        ts = TTF_RenderUTF8_Blended(g_font, "正在加载会话列表…", COL_TEXT2);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        return;
+    }
+
+    if (g_sess_err[0]) {
+        ts = TTF_RenderUTF8_Blended(g_font, g_sess_err, COL_RED);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        const char *hint = "B 返回重试(请确认桥接已启动、地址正确)";
+        ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 110, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        return;
+    }
+
+    /* 第一行:新建会话 */
+    {
+        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
+        if (g_sess_idx == 0)
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+        ts = TTF_RenderUTF8_Blended(g_font, "＋ 新建会话", COL_BRAND);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        y += row_h + 8;
+    }
+
+    for (size_t i = 0; i < g_sessions_n; i++) {
+        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
+        if ((int)i + 1 == g_sess_idx)
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+        else
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+
+        /* 标题(截断) */
+        char title[128];
+        snprintf(title, sizeof(title), "%s", g_sessions[i].title);
+        ts = TTF_RenderUTF8_Blended(g_font, title, COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + 10, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+
+        /* 右侧:状态 + 时间 */
+        char meta[64];
+        if (g_sessions[i].running) snprintf(meta, sizeof(meta), "● 运行中");
+        else fmt_time(g_sessions[i].updated_at, meta, sizeof(meta));
+        ts = TTF_RenderUTF8_Blended(g_font_hint, meta,
+                                    g_sessions[i].running ? COL_GREEN : COL_TEXT3);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + row.w - ts->w - 20, row.y + (row_h - ts->h) / 2,
+                           ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        y += row_h + 8;
+        if (y > WIN_H - 100) break; /* 一屏装不下就截断 */
+    }
+
+    const char *hint = "↑↓ 选择    A 打开    B 返回    + 退出";
+    ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, WIN_H - 48, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+}
+
 /* ---------- 生命周期 ---------- */
 
 int app_init(void) {
@@ -766,7 +1016,7 @@ int app_init(void) {
 
     add_msg(ROLE_ASSISTANT,
             "欢迎使用 DSH Switch 客户端。\n"
-            "A 输入消息;X 清屏;Y 设置;+ 退出。\n"
+            "A 输入消息;X 会话列表/清屏;Y 设置;+ 退出。\n"
             "配置也会保存在 sdmc:/switch/switch-dsh-client/config.json", 1);
     return 0;
 }
@@ -782,6 +1032,9 @@ int app_frame(void) {
         choice_input(kDown);
     } else if (g_screen == SCREEN_SETTINGS) {
         settings_input(kDown);
+    } else if (g_screen == SCREEN_SESSIONS) {
+        if (!g_sess_loaded && !g_sess_err[0]) sessions_load();
+        sessions_input(kDown);
     } else {
         if ((kDown & HidNpadButton_A) && !g_worker_busy) {
             if (textinput_prompt("输入消息", NULL, 1, 0, g_input, sizeof(g_input)) == 1) {
@@ -791,11 +1044,8 @@ int app_frame(void) {
             }
         }
         if ((kDown & HidNpadButton_X) && !g_worker_busy) {
-            while (g_nmsgs > 0) {
-                g_nmsgs--;
-                free(g_msgs[g_nmsgs].text);
-                g_msgs[g_nmsgs].text = NULL;
-            }
+            if (strcmp(g_cfg.backend, "harness") == 0) enter_sessions(0);
+            else clear_msgs();
             g_dirty = 1;
         }
         if ((kDown & HidNpadButton_Y) && !g_worker_busy) {
@@ -810,6 +1060,7 @@ int app_frame(void) {
     if (g_dirty) {
         if (g_screen == SCREEN_CHOICE) render_choice();
         else if (g_screen == SCREEN_SETTINGS) render_settings();
+        else if (g_screen == SCREEN_SESSIONS) render_sessions();
         else render_chat();
         g_dirty = 0;
     }
@@ -820,6 +1071,9 @@ int app_frame(void) {
 void app_exit(void) {
     for (int i = 0; i < g_nmsgs; i++) free(g_msgs[i].text);
     g_nmsgs = 0;
+    harness_sessions_free(g_sessions, g_sessions_n);
+    g_sessions = NULL;
+    g_sessions_n = 0;
     app_event_t ev;
     while (pop_event(&ev)) free(ev.text);
     if (g_q_mtx) SDL_DestroyMutex(g_q_mtx);

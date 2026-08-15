@@ -16,6 +16,7 @@
 #endif
 
 #include "backend.h"
+#include "backend_harness.h"
 #include "net.h"
 #include "cJSON.h"
 
@@ -133,14 +134,22 @@ static int rpc(const char *base, const char *method, cJSON *payload,
 
 /* ---------- 会话保障 ---------- */
 
-static int ensure_session(const backend_config_t *cfg, char *err, size_t errsz) {
+static char *normalize_base(const backend_config_t *cfg) {
     char *base = strdup(cfg->harness_base_url ? cfg->harness_base_url : "");
+    if (!base) return NULL;
+    size_t len = strlen(base);
+    while (len > 0 && base[len - 1] == '/') base[--len] = '\0';
+    return base;
+}
+
+/* force_new=1 时忽略已保存的会话,直接新建 */
+static int ensure_session(const backend_config_t *cfg, char *err, size_t errsz,
+                          int force_new) {
+    char *base = normalize_base(cfg);
     if (!base) {
         if (err && errsz) snprintf(err, errsz, "内存不足");
         return -1;
     }
-    size_t len = strlen(base);
-    while (len > 0 && base[len - 1] == '/') base[--len] = '\0';
 
     if (g_base && strcmp(g_base, base) == 0 && g_session) {
         free(base);
@@ -150,8 +159,10 @@ static int ensure_session(const backend_config_t *cfg, char *err, size_t errsz) 
     free(g_base);
     free(g_session);
     g_base = base;
-    g_session = load_session();
-    if (g_session) return 0;
+    if (!force_new) {
+        g_session = load_session();
+        if (g_session) return 0;
+    }
 
     cJSON *payload = cJSON_CreateObject();
     cJSON *val = NULL;
@@ -244,7 +255,7 @@ static int harness_chat(const backend_config_t *cfg,
         return 0;
     }
 
-    if (ensure_session(cfg, err, sizeof(err)) != 0) {
+    if (ensure_session(cfg, err, sizeof(err), 0) != 0) {
         if (on_done) on_done(0, err, ud);
         return 0;
     }
@@ -283,6 +294,197 @@ static int harness_chat(const backend_config_t *cfg,
         else if (ctx.err[0]) on_done(0, ctx.err, ud);
         else on_done(1, NULL, ud);
     }
+    return 0;
+}
+
+/* ---------- 会话浏览 / 切换 / 历史 ---------- */
+
+int harness_list_sessions(const backend_config_t *cfg,
+                          harness_session_t **out_list, size_t *out_n,
+                          char *err, size_t errsz) {
+    *out_list = NULL;
+    *out_n = 0;
+
+    char *base = normalize_base(cfg);
+    if (!base) {
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+
+    cJSON *val = NULL;
+    int rc = rpc(base, "session.list", cJSON_CreateObject(), &val, err, errsz);
+    free(base);
+    if (rc != 0) return -1;
+
+    const cJSON *items = val ? cJSON_GetObjectItemCaseSensitive(val, "items") : NULL;
+    size_t n = cJSON_IsArray(items) ? cJSON_GetArraySize(items) : 0;
+    harness_session_t *list = (harness_session_t *)calloc(n ? n : 1, sizeof(*list));
+    if (!list) {
+        cJSON_Delete(val);
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        const cJSON *it = cJSON_GetArrayItem(items, i);
+        const cJSON *sid = cJSON_GetObjectItemCaseSensitive(it, "sessionId");
+        if (!cJSON_IsString(sid) || !sid->valuestring[0]) continue;
+        const cJSON *proj = cJSON_GetObjectItemCaseSensitive(it, "projections");
+        const cJSON *vals = proj ? cJSON_GetObjectItemCaseSensitive(proj, "values") : NULL;
+        const cJSON *title = vals ? cJSON_GetObjectItemCaseSensitive(vals, "title") : NULL;
+        const cJSON *blank = cJSON_GetObjectItemCaseSensitive(it, "blank");
+        const cJSON *running = cJSON_GetObjectItemCaseSensitive(it, "running");
+        const cJSON *upd = cJSON_GetObjectItemCaseSensitive(it, "updatedAt");
+
+        list[k].session_id = strdup(sid->valuestring);
+        if (cJSON_IsString(title) && title->valuestring[0])
+            list[k].title = strdup(title->valuestring);
+        else
+            list[k].title = strdup(cJSON_IsTrue(blank) ? "空白会话" : "未命名会话");
+        list[k].running = cJSON_IsTrue(running);
+        list[k].updated_at = cJSON_IsNumber(upd) ? (long long)upd->valuedouble : 0;
+        k++;
+    }
+    cJSON_Delete(val);
+    *out_list = list;
+    *out_n = k;
+    return 0;
+}
+
+void harness_sessions_free(harness_session_t *list, size_t n) {
+    if (!list) return;
+    for (size_t i = 0; i < n; i++) {
+        free(list[i].session_id);
+        free(list[i].title);
+    }
+    free(list);
+}
+
+int harness_use_session(const backend_config_t *cfg, const char *session_id,
+                        char *err, size_t errsz) {
+    char *base = normalize_base(cfg);
+    if (!base) {
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+    if (!g_base || strcmp(g_base, base) != 0) {
+        free(g_base);
+        g_base = base;
+        free(g_session);
+        g_session = NULL;
+    } else {
+        free(base);
+    }
+
+    if (session_id && session_id[0]) {
+        free(g_session);
+        g_session = strdup(session_id);
+        save_session(g_session);
+        return 0;
+    }
+    free(g_session);
+    g_session = NULL;
+    return ensure_session(cfg, err, errsz, 1); /* 强制新建 */
+}
+
+/* 把 content 数组里的 text 块拼进 *buf */
+static void append_text_parts(const cJSON *content, char **buf, size_t *len) {
+    if (!cJSON_IsArray(content)) return;
+    size_t n = cJSON_GetArraySize(content);
+    for (size_t i = 0; i < n; i++) {
+        const cJSON *part = cJSON_GetArrayItem(content, i);
+        const cJSON *type = cJSON_GetObjectItemCaseSensitive(part, "type");
+        const cJSON *text = cJSON_GetObjectItemCaseSensitive(part, "text");
+        if (!cJSON_IsString(type) || strcmp(type->valuestring, "text") != 0 ||
+            !cJSON_IsString(text) || !text->valuestring[0])
+            continue;
+        size_t add = strlen(text->valuestring);
+        if (*len == 0) {
+            *buf = strdup(text->valuestring);
+            if (*buf) *len = add;
+        } else {
+            char *nb = (char *)realloc(*buf, *len + add + 1);
+            if (nb) {
+                memcpy(nb + *len, text->valuestring, add + 1);
+                *buf = nb;
+                *len += add;
+            }
+        }
+    }
+}
+
+int harness_fetch_history(const backend_config_t *cfg,
+                          chat_message_t **out_msgs, size_t *out_n,
+                          char *err, size_t errsz) {
+    *out_msgs = NULL;
+    *out_n = 0;
+
+    if (!g_session) {
+        if (ensure_session(cfg, err, errsz, 0) != 0) return -1;
+    }
+
+    cJSON *payload = cJSON_CreateObject();
+    cJSON_AddStringToObject(payload, "sessionId", g_session);
+    cJSON_AddNumberToObject(payload, "maxMessages", 50);
+    cJSON *val = NULL;
+    if (rpc(g_base, "session.history", payload, &val, err, errsz) != 0) return -1;
+
+    const cJSON *events = val ? cJSON_GetObjectItemCaseSensitive(val, "events") : NULL;
+    size_t n = cJSON_IsArray(events) ? cJSON_GetArraySize(events) : 0;
+
+    /* 扫描全部事件,用环形缓冲保留最后 64 条 user/assistant 消息 */
+    chat_message_t *msgs = (chat_message_t *)calloc(64, sizeof(*msgs));
+    if (!msgs) {
+        cJSON_Delete(val);
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+    size_t m_total = 0;
+    for (size_t i = 0; i < n; i++) {
+        const cJSON *item = cJSON_GetArrayItem(events, i);
+        const cJSON *ev = item ? cJSON_GetObjectItemCaseSensitive(item, "event") : NULL;
+        const cJSON *type = ev ? cJSON_GetObjectItemCaseSensitive(ev, "type") : NULL;
+        const cJSON *data = ev ? cJSON_GetObjectItemCaseSensitive(ev, "data") : NULL;
+        if (!cJSON_IsString(type) || !data) continue;
+
+        int role = -1;
+        const cJSON *content = NULL;
+        if (strcmp(type->valuestring, "user/message") == 0) {
+            role = ROLE_USER;
+            content = cJSON_GetObjectItemCaseSensitive(data, "content");
+        } else if (strcmp(type->valuestring, "assistant/message") == 0) {
+            role = ROLE_ASSISTANT;
+            const cJSON *message = cJSON_GetObjectItemCaseSensitive(data, "message");
+            content = message ? cJSON_GetObjectItemCaseSensitive(message, "content") : NULL;
+        }
+        if (role < 0) continue;
+
+        char *text = NULL;
+        size_t tlen = 0;
+        append_text_parts(content, &text, &tlen);
+        if (text && text[0]) {
+            size_t slot = m_total % 64;
+            free(msgs[slot].content);
+            msgs[slot].role = (chat_role_t)role;
+            msgs[slot].content = text;
+            m_total++;
+        } else {
+            free(text);
+        }
+    }
+    cJSON_Delete(val);
+
+    size_t m = m_total < 64 ? m_total : 64;
+    if (m_total > 64) {
+        /* 旋转:最旧消息挪到下标 0 */
+        size_t rot = m_total % 64;
+        chat_message_t tmp[64];
+        memcpy(tmp, msgs, sizeof(tmp));
+        for (size_t i = 0; i < 64; i++) msgs[i] = tmp[(i + rot) % 64];
+    }
+    *out_msgs = msgs;
+    *out_n = m;
     return 0;
 }
 
