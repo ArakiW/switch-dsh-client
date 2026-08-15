@@ -36,12 +36,16 @@ typedef struct {
 } backend_config_t;
 
 /*
- * 流式回调。
- * is_reasoning:0 = 正文增量,1 = 思考过程增量(以暗色显示)。
+ * 流式回调。kind:
+ *   0 = 正文增量
+ *   1 = 思考过程增量(暗色显示)
+ *   2 = 工具活动(如 "read"),以活动行显示
+ *   3 = 需要用户处理的提示(审批/提问),以醒目色显示
+ *   4 = 任务清单(todo/write),整串替换显示
  * 注意:实现可在后台线程中调用这两个回调,调用方(UI)必须自行
  * 把数据投递到主线程(互斥队列),不要在回调里直接碰 SDL 纹理。
  */
-typedef void (*backend_chunk_cb)(const char *delta, int is_reasoning, void *userdata);
+typedef void (*backend_chunk_cb)(const char *delta, int kind, void *userdata);
 typedef void (*backend_done_cb)(int ok, const char *error, void *userdata);
 
 /*
@@ -77,13 +81,15 @@ typedef struct {
 } model_option_t;
 
 /*
- * 取可选模型列表并给当前模型(cur,可为 NULL 表示未知)。
+ * 取可选模型列表并给当前模型(cur)与当前推理强度(cur_effort,可空)。
  * harness:session.models;deepseek:GET /models(失败回退内置列表)。
  * 成功 0;*out 由 backend_models_free 释放。
  */
 int backend_list_models(const backend_config_t *cfg,
                         model_option_t **out, size_t *out_n,
-                        char *cur, size_t cursz, char *err, size_t errsz);
+                        char *cur, size_t cursz,
+                        char *cur_effort, size_t cur_effort_sz,
+                        char *err, size_t errsz);
 
 void backend_models_free(model_option_t *list, size_t n);
 
@@ -94,5 +100,13 @@ void backend_models_free(model_option_t *list, size_t n);
  */
 int backend_apply_model(backend_config_t *cfg, const char *model_id,
                         char *err, size_t errsz);
+
+/*
+ * 设置推理强度("low"/"high"):
+ * harness -> 当前模型 + session.selectModel(reasoningEffort);
+ * deepseek -> 映射为 thinking:low=disabled,high=enabled。
+ */
+int backend_apply_effort(backend_config_t *cfg, const char *effort,
+                         char *err, size_t errsz);
 
 #endif /* SWITCH_DSH_BACKEND_H */

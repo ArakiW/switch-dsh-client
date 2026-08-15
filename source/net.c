@@ -48,6 +48,11 @@ void net_buffer_free(net_buffer_t *b) {
 
 /* ---------- SSE ---------- */
 
+static volatile int g_sse_cancel = 0;
+
+void net_sse_cancel(void) { g_sse_cancel = 1; }
+int net_sse_aborted(void) { return g_sse_cancel != 0; }
+
 typedef struct {
     net_sse_line_cb on_line;
     void *ud;
@@ -59,6 +64,10 @@ static size_t sse_write(char *ptr, size_t size, size_t nmemb, void *ud) {
     sse_ctx_t *c = (sse_ctx_t *)ud;
     size_t n = size * nmemb;
     if (n == 0) return 0;
+    if (g_sse_cancel) { /* 外部请求中止 */
+        c->aborted = 1;
+        return 0;
+    }
 
     for (size_t i = 0; i < n; i++) {
         char ch = ptr[i];
@@ -175,6 +184,7 @@ int net_sse(const char *url, const char *method, const char *body,
             const char *const *headers, size_t n_headers,
             net_sse_line_cb on_line, void *userdata, char *err, size_t errsz) {
     if (err && errsz) err[0] = '\0';
+    g_sse_cancel = 0; /* 复位中止标志 */
 
     CURL *curl = new_easy(url, err, errsz);
     if (!curl) return -1;

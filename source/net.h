@@ -37,4 +37,11 @@ int net_sse(const char *url, const char *method, const char *body,
             const char *const *headers, size_t n_headers,
             net_sse_line_cb on_line, void *userdata, char *err, size_t errsz);
 
+/*
+ * 请求中止:从任意线程调用,使正在进行的 net_sse 尽快返回(返回 0,
+ * 视为"已中止")。下次 net_sse 开始时自动复位。
+ */
+void net_sse_cancel(void);
+int net_sse_aborted(void);
+
 #endif /* SWITCH_DSH_NET_H */

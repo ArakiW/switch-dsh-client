@@ -136,6 +136,7 @@ static int ds_chat(const backend_config_t *cfg,
 
     if (on_done) {
         if (rc != 0) on_done(0, err[0] ? err : "连接中断", ud);
+        else if (net_sse_aborted()) on_done(1, NULL, ud); /* 用户主动停止 */
         else if (ctx.err[0]) on_done(0, ctx.err, ud);
         else if (!ctx.done) on_done(0, "响应意外结束", ud);
         else on_done(1, NULL, ud);
@@ -151,11 +152,19 @@ static int ds_chat(const backend_config_t *cfg,
  */
 int deepseek_list_models(const backend_config_t *cfg,
                          model_option_t **out, size_t *out_n,
-                         char *cur, size_t cursz, char *err, size_t errsz) {
+                         char *cur, size_t cursz,
+                         char *cur_effort, size_t cur_effort_sz,
+                         char *err, size_t errsz) {
     *out = NULL;
     *out_n = 0;
     if (cur && cursz)
         snprintf(cur, cursz, "%s", cfg->model ? cfg->model : "");
+    if (cur_effort && cur_effort_sz) {
+        snprintf(cur_effort, cur_effort_sz, "%s",
+                 (cfg->deepseek_thinking &&
+                  strcmp(cfg->deepseek_thinking, "enabled") == 0)
+                     ? "high" : "low");
+    }
 
     const char *base = cfg->deepseek_base_url ? cfg->deepseek_base_url
                                               : "https://api.deepseek.com";

@@ -13,6 +13,7 @@
 #include "backend.h"
 #include "backend_harness.h"
 #include "config.h"
+#include "net.h"
 #include "textinput.h"
 #include "util.h"
 
@@ -26,10 +27,12 @@
 #define MAX_QUEUE    512
 
 typedef struct {
-    char *text;  /* 正文, malloc, UTF-8 */
-    char *think; /* 思考过程(可 NULL) */
-    int role;    /* ROLE_USER / ROLE_ASSISTANT */
-    int done;    /* 助手消息是否已结束(流式标记) */
+    char *text;   /* 正文, malloc, UTF-8 */
+    char *think;  /* 思考过程(可 NULL) */
+    char *tools;  /* 工具活动行(可 NULL) */
+    char *notice; /* 处理提示(审批/提问,可 NULL) */
+    int role;     /* ROLE_USER / ROLE_ASSISTANT */
+    int done;     /* 助手消息是否已结束(流式标记) */
 } msg_t;
 
 /* 工作线程 -> 主线程 事件队列 */
@@ -41,6 +44,7 @@ typedef struct {
 typedef enum {
     SCREEN_CHOICE, SCREEN_CHAT, SCREEN_SETTINGS,
     SCREEN_SESSIONS, SCREEN_WORKSPACES, SCREEN_WS_SESSIONS, SCREEN_MODELS,
+    SCREEN_SEARCH,
 } screen_t;
 
 static SDL_Window   *g_win   = NULL;
@@ -75,6 +79,7 @@ static size_t g_wss_n = 0;
 static int g_ws_loaded = 0;
 static int g_ws_idx = 0;
 static char g_ws_err[256];
+static int g_ws_confirm = -1; /* 删除确认:-1 = 无,>=0 = 该行待确认 */
 
 /* 工作区内会话 */
 static harness_session_t *g_wss_sessions = NULL;
@@ -97,6 +102,12 @@ static app_event_t g_queue[MAX_QUEUE];
 static int g_q_head = 0, g_q_tail = 0, g_q_count = 0;
 static volatile int g_worker_busy = 0;
 static int g_stream_think = 0; /* 当前流式处于思考阶段 */
+
+/* 任务清单 / 历史翻页 / 推理强度 */
+static char g_todos_str[512];
+static int g_stick_top = 0;
+static long long g_first_seq = -1;
+static char g_cur_effort[16] = "";
 
 /* 配色对齐 DeepSeek Harness Web 暗色主题(design-platform.css) */
 static const SDL_Color COL_BG    = {  21,  21,  23, 255 }; /* bg-base (bluish-950) */
@@ -148,6 +159,8 @@ static void add_msg(int role, const char *text, int done) {
     if (g_nmsgs >= MAX_MSGS) {
         free(g_msgs[0].text);
         free(g_msgs[0].think);
+        free(g_msgs[0].tools);
+        free(g_msgs[0].notice);
         memmove(&g_msgs[0], &g_msgs[1], sizeof(msg_t) * (MAX_MSGS - 1));
         g_nmsgs = MAX_MSGS - 1;
     }
@@ -158,6 +171,8 @@ static void add_msg(int role, const char *text, int done) {
         utf8_sanitize(m->text); /* 剥离字体无法渲染的字符 */
     }
     m->think = NULL;
+    m->tools = NULL;
+    m->notice = NULL;
     m->role = role;
     m->done = done;
     g_dirty = 1;
@@ -194,9 +209,11 @@ static int pop_event(app_event_t *out) {
 
 /* ---------- 后台线程 ---------- */
 
-static void backend_chunk(const char *delta, int is_reasoning, void *ud) {
+static void backend_chunk(const char *delta, int kind, void *ud) {
     (void)ud;
-    push_event(is_reasoning ? 4 : 1, delta);
+    /* kind: 0 正文 1 思考 2 工具 3 提示 4 任务 */
+    static const int map[] = { 1, 4, 5, 6, 7 };
+    if (kind >= 0 && kind <= 4) push_event(map[kind], delta);
 }
 
 static void backend_done(int ok, const char *error, void *ud) {
@@ -303,6 +320,32 @@ static void drain_queue(void) {
             }
             g_stream_think = 1;
             g_dirty = 1;
+        } else if (ev.kind == 5 || ev.kind == 6) {
+            /* 工具活动(5)/处理提示(6) */
+            if (g_nmsgs > 0) {
+                msg_t *m = &g_msgs[g_nmsgs - 1];
+                if (m->role == ROLE_ASSISTANT && !m->done) {
+                    char **field = (ev.kind == 5) ? &m->tools : &m->notice;
+                    char buf[640];
+                    if (ev.kind == 5)
+                        snprintf(buf, sizeof(buf), "· 工具:%s", ev.text ? ev.text : "");
+                    else
+                        snprintf(buf, sizeof(buf), "%s", ev.text ? ev.text : "");
+                    size_t old = *field ? strlen(*field) : 0;
+                    size_t add = strlen(buf);
+                    char *nt = (char *)realloc(*field, old + add + 2);
+                    if (nt) {
+                        char *dst = nt + old;
+                        if (old > 0) *dst++ = '\n';
+                        memcpy(dst, buf, add + 1);
+                        *field = nt;
+                    }
+                }
+            }
+            g_dirty = 1;
+        } else if (ev.kind == 7) {
+            snprintf(g_todos_str, sizeof(g_todos_str), "%s", ev.text ? ev.text : "");
+            g_dirty = 1;
         } else if (ev.kind == 2) {
             if (g_nmsgs > 0) {
                 g_msgs[g_nmsgs - 1].done = 1;
@@ -387,6 +430,138 @@ static void draw_line(TTF_Font *font, SDL_Color col, int x, int y,
     SDL_FreeSurface(surf);
 }
 
+/* ---------- Markdown-lite 渲染 ---------- */
+
+static void strip_md_markers(const char *src, char *dst, size_t dstsz) {
+    size_t o = 0;
+    for (const char *p = src; *p && o + 1 < dstsz; p++) {
+        if (p[0] == '*' && p[1] == '*') {
+            p++;
+            continue;
+        }
+        dst[o++] = *p;
+    }
+    dst[o] = '\0';
+}
+
+/* 画一行,支持 ** 粗体分段;返回推进的像素 */
+static int draw_md_line(TTF_Font *font, SDL_Color col, SDL_Color boldc,
+                        int force_bold, int x, int y,
+                        const char *text, size_t off, size_t len) {
+    char buf[MAX_LINE_LEN];
+    if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+    memcpy(buf, text + off, len);
+    buf[len] = '\0';
+    int cx = x;
+    if (force_bold) {
+        draw_line(font, boldc, cx, y, buf, 0, strlen(buf));
+        int w = 0, h = 0;
+        TTF_SizeUTF8(font, buf, &w, &h);
+        return w;
+    }
+    char *seg = buf;
+    int bold = 0;
+    while (*seg) {
+        char *mark = strstr(seg, "**");
+        if (mark) *mark = '\0';
+        if (*seg) {
+            draw_line(font, bold ? boldc : col, cx, y, seg, 0, strlen(seg));
+            int w = 0, h = 0;
+            TTF_SizeUTF8(font, seg, &w, &h);
+            cx += w;
+        }
+        if (!mark) break;
+        seg = mark + 2;
+        bold = !bold;
+    }
+    return cx - x;
+}
+
+/*
+ * 渲染/测量一段文本(markdown-lite):
+ *   - "#" 开头的行整行加粗
+ *   - ``` 围住的代码块:小号字体、次级色、缩进 + 背景条
+ *   - ** 之间的内容加粗显示
+ * measure_only=1 时只计算不绘制。返回总高度;*max_w_out 为最宽行宽。
+ */
+static int render_md_text(int maxw, int lineh, int x, int y, const char *text,
+                          SDL_Color base_col, SDL_Color bold_col,
+                          int measure_only, int *max_w_out) {
+    int cy = y;
+    int in_code = 0;
+    const char *p = text;
+    char line[8192];
+    *max_w_out = 0;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (len == 0) {
+            cy += lineh / 2;
+            p += 1;
+            continue;
+        }
+        size_t cl = len;
+        if (cl >= sizeof(line)) cl = sizeof(line) - 1;
+        memcpy(line, p, cl);
+        line[cl] = '\0';
+        p += (nl ? len + 1 : len);
+
+        if (strncmp(line, "```", 3) == 0) {
+            in_code = !in_code;
+            continue;
+        }
+
+        TTF_Font *lf = g_font;
+        int lh = lineh;
+        int indent = 0;
+        SDL_Color col = base_col;
+        SDL_Color boldc = bold_col;
+        int force_bold = 0;
+
+        if (in_code) {
+            lf = g_font_hint;
+            lh = TTF_FontHeight(lf) + 4;
+            indent = 10;
+            col = COL_TEXT2;
+            boldc = COL_TEXT2;
+        } else if (line[0] == '#') {
+            force_bold = 1;
+        }
+
+        char *t = line;
+        if (line[0] == '#') {
+            while (*t == '#') t++;
+            while (*t == ' ' || *t == '\t') t++;
+        }
+
+        wrap_line_t wl[MAX_LINES];
+        int nwl = wrap_text(lf, maxw - indent, t, wl, MAX_LINES);
+        for (int j = 0; j < nwl; j++) {
+            char buf[MAX_LINE_LEN];
+            size_t bl = wl[j].len;
+            if (bl >= sizeof(buf)) bl = sizeof(buf) - 1;
+            memcpy(buf, t + wl[j].off, bl);
+            buf[bl] = '\0';
+            char mb[MAX_LINE_LEN];
+            strip_md_markers(buf, mb, sizeof(mb));
+            int w = 0, h = 0;
+            TTF_SizeUTF8(lf, mb, &w, &h);
+            if (w > *max_w_out) *max_w_out = w;
+            if (!measure_only) {
+                if (in_code) {
+                    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+                    SDL_Rect bg = { x + indent - 6, cy, w + 12, lh };
+                    SDL_RenderFillRect(g_ren, &bg);
+                }
+                draw_md_line(lf, col, boldc, force_bold,
+                             x + indent, cy, t, wl[j].off, wl[j].len);
+            }
+            cy += lh;
+        }
+    }
+    return cy - y;
+}
+
 /* ---------- 渲染 ---------- */
 
 static void render_chat(void) {
@@ -437,41 +612,57 @@ static void render_chat(void) {
     const int pad_x = 14;
     const int pad_y = 10;
 
-    /* 先测总高,自动贴底(含思考段) */
+    /* 任务清单条(顶部浮层) */
+    if (g_todos_str[0]) {
+        int wout = 0;
+        int th2 = render_md_text(maxw + 80, lineh, 40, HEADER_H + 8,
+                                 g_todos_str, COL_TEXT3, COL_TEXT3, 1, &wout);
+        SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+        SDL_Rect tbg = { 24, HEADER_H + 4, WIN_W - 48, th2 + 8 };
+        SDL_RenderFillRect(g_ren, &tbg);
+        render_md_text(maxw + 80, lineh, 40, HEADER_H + 8,
+                       g_todos_str, COL_TEXT3, COL_TEXT3, 0, &wout);
+    }
+
+    /* 先测总高(正文 markdown + 思考 + 工具 + 提示),自动贴底 */
     int total_h = 0;
     for (int i = 0; i < g_nmsgs; i++) {
         msg_t *mm = &g_msgs[i];
-        int nl = wrap_text(g_font, maxw, mm->text, NULL, MAX_LINES);
+        int tw = 0, th = 0;
+        if (mm->text && mm->text[0])
+            th = render_md_text(maxw, lineh, 0, 0, mm->text,
+                                COL_TEXT, COL_WHITE, 1, &tw);
         int tnl = 0;
         if (mm->think && mm->think[0])
             tnl = wrap_text(g_font, maxw, mm->think, NULL, MAX_LINES);
-        total_h += (nl + tnl) * lineh + pad_y * 2 + 12 + (tnl > 0 ? 10 : 0);
+        int toolh = 0, noth = 0, tmpw = 0;
+        if (mm->tools && mm->tools[0])
+            toolh = render_md_text(maxw, lineh, 0, 0, mm->tools,
+                                   COL_TEXT2, COL_TEXT2, 1, &tmpw);
+        if (mm->notice && mm->notice[0])
+            noth = render_md_text(maxw, lineh, 0, 0, mm->notice,
+                                  COL_RED, COL_RED, 1, &tmpw);
+        total_h += th + toolh + noth + tnl * lineh + pad_y * 2 + 12
+                 + (tnl > 0 ? 10 : 0) + ((toolh > 0 || noth > 0) ? 10 : 0);
     }
     int y = area_y0;
-    if (total_h > (area_y1 - area_y0)) y -= (total_h - (area_y1 - area_y0));
+    if (!g_stick_top && total_h > (area_y1 - area_y0))
+        y -= (total_h - (area_y1 - area_y0));
 
     for (int i = 0; i < g_nmsgs; i++) {
         msg_t *m = &g_msgs[i];
-        wrap_line_t lines[MAX_LINES];
+
+        /* 测量各段 */
+        int tw = 0, th = 0;
+        if (m->text && m->text[0])
+            th = render_md_text(maxw, lineh, 0, 0, m->text,
+                                (m->role == ROLE_USER) ? COL_WHITE : COL_TEXT,
+                                COL_WHITE, 1, &tw);
         wrap_line_t tlines[MAX_LINES];
-        int nl = wrap_text(g_font, maxw, m->text, lines, MAX_LINES);
         int tnl = 0;
         if (m->think && m->think[0])
             tnl = wrap_text(g_font, maxw, m->think, tlines, MAX_LINES);
-        if (nl <= 0 && tnl <= 0) continue;
-
-        /* 气泡宽 = 最宽行(正文+思考) */
-        int bw = 0;
-        for (int j = 0; j < nl; j++) {
-            char buf[MAX_LINE_LEN];
-            size_t len = lines[j].len;
-            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            memcpy(buf, m->text + lines[j].off, len);
-            buf[len] = '\0';
-            int w = 0, h = 0;
-            TTF_SizeUTF8(g_font, buf, &w, &h);
-            if (w > bw) bw = w;
-        }
+        int tlw = 0;
         for (int j = 0; j < tnl; j++) {
             char buf[MAX_LINE_LEN];
             size_t len = tlines[j].len;
@@ -480,9 +671,23 @@ static void render_chat(void) {
             buf[len] = '\0';
             int w = 0, h = 0;
             TTF_SizeUTF8(g_font, buf, &w, &h);
-            if (w > bw) bw = w;
+            if (w > tlw) tlw = w;
         }
-        int bh = (nl + tnl) * lineh + pad_y * 2 + (tnl > 0 ? 10 : 0);
+        int toolw = 0, toolh = 0, notw = 0, noth = 0;
+        if (m->tools && m->tools[0])
+            toolh = render_md_text(maxw, lineh, 0, 0, m->tools,
+                                   COL_TEXT2, COL_TEXT2, 1, &toolw);
+        if (m->notice && m->notice[0])
+            noth = render_md_text(maxw, lineh, 0, 0, m->notice,
+                                  COL_RED, COL_RED, 1, &notw);
+
+        int bw = tw;
+        if (tlw > bw) bw = tlw;
+        if (toolw > bw) bw = toolw;
+        if (notw > bw) bw = notw;
+        int bh = th + toolh + noth + tnl * lineh + pad_y * 2
+               + (tnl > 0 ? 10 : 0) + ((toolh > 0 || noth > 0) ? 10 : 0);
+        if (bh <= pad_y * 2) continue;
         int bx = (m->role == ROLE_USER) ? (WIN_W - mx - bw - pad_x * 2) : mx;
 
         /* Harness 风格圆角气泡:用户=品牌蓝,助手=surface+发丝边框 */
@@ -513,11 +718,32 @@ static void render_chat(void) {
             SDL_RenderFillRect(g_ren, &div);
             ty += tnl * lineh + 10;
         }
-        /* 正文 */
-        SDL_Color text_col = (m->role == ROLE_USER) ? COL_WHITE : COL_TEXT;
-        for (int j = 0; j < nl; j++) {
-            draw_line(g_font, text_col, bx + pad_x, ty + j * lineh,
-                      m->text, lines[j].off, lines[j].len);
+        /* 工具活动 */
+        if (toolh > 0) {
+            int wout = 0;
+            render_md_text(maxw, lineh, bx + pad_x, ty, m->tools,
+                           COL_TEXT2, COL_TEXT2, 0, &wout);
+            ty += toolh;
+        }
+        /* 处理提示(红) */
+        if (noth > 0) {
+            int wout = 0;
+            render_md_text(maxw, lineh, bx + pad_x, ty, m->notice,
+                           COL_RED, COL_RED, 0, &wout);
+            ty += noth;
+        }
+        if (toolh > 0 || noth > 0) {
+            SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+            SDL_Rect div = { bx + pad_x, ty + 3, bw, 1 };
+            SDL_RenderFillRect(g_ren, &div);
+            ty += 10;
+        }
+        /* 正文(markdown-lite) */
+        if (th > 0) {
+            int wout = 0;
+            render_md_text(maxw, lineh, bx + pad_x, ty, m->text,
+                           (m->role == ROLE_USER) ? COL_WHITE : COL_TEXT,
+                           COL_WHITE, 0, &wout);
         }
         y += bh + 12;
     }
@@ -531,11 +757,11 @@ static void render_chat(void) {
     SDL_RenderFillRect(g_ren, &fhair);
 
     const char *hint = g_worker_busy
-                           ? (g_stream_think ? "思考中…请稍候    + 退出"
-                                             : "回复中…请稍候    + 退出")
+                           ? (g_stream_think ? "思考中…(B 停止)    + 退出"
+                                             : "回复中…(B 停止)    + 退出")
                            : (strcmp(g_cfg.backend, "harness") == 0
-                              ? "A 输入  X 工作区  Y 设置  L 模型  R 切后端  + 退出"
-                              : "A 输入  X 清屏  Y 设置  L 模型  R 切后端  + 退出");
+                              ? "A输入 B停止 X工作区 Y设置 L模型 R后端 ZL更早 ZR最新 +退出"
+                              : "A输入 B停止 X清屏 Y设置 L模型 R后端 +退出");
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -917,6 +1143,10 @@ static void enter_ws_sessions(int ws_idx);
 static void render_ws_sessions(void);
 static void enter_models(void);
 static void render_models(void);
+static void search_start(void);
+static void search_load(void);
+static void search_input(u64 kDown);
+static void render_search(void);
 
 /* ---------- 启动后端选择界面 ---------- */
 
@@ -1061,9 +1291,16 @@ static void clear_msgs(void) {
         g_nmsgs--;
         free(g_msgs[g_nmsgs].text);
         free(g_msgs[g_nmsgs].think);
+        free(g_msgs[g_nmsgs].tools);
+        free(g_msgs[g_nmsgs].notice);
         g_msgs[g_nmsgs].text = NULL;
         g_msgs[g_nmsgs].think = NULL;
+        g_msgs[g_nmsgs].tools = NULL;
+        g_msgs[g_nmsgs].notice = NULL;
     }
+    g_todos_str[0] = '\0';
+    g_stick_top = 0;
+    g_first_seq = -1;
 }
 
 static void enter_sessions(int from_startup) {
@@ -1114,11 +1351,14 @@ static void sessions_pick(void) {
     if (sid) {
         chat_message_t *msgs = NULL;
         size_t n = 0;
-        if (harness_fetch_history(&g_cfg, &msgs, &n, err, sizeof(err)) == 0) {
+        long long first = -1;
+        if (harness_fetch_history_ex(&g_cfg, 0, &msgs, &n, &first,
+                                     err, sizeof(err)) == 0) {
             for (size_t i = 0; i < n; i++)
                 add_msg(msgs[i].role, msgs[i].content ? msgs[i].content : "", 1);
             for (size_t i = 0; i < n; i++) free(msgs[i].content);
             free(msgs);
+            g_first_seq = first;
         } else {
             add_msg(ROLE_ASSISTANT, "历史加载失败,从新消息开始。", 1);
         }
@@ -1156,6 +1396,44 @@ static void sessions_input(u64 kDown) {
     if (kDown & HidNpadButton_Up) {
         if (g_sess_idx > 0) g_sess_idx--;
         g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_Y) {
+        if (g_sess_idx > 0 && (size_t)g_sess_idx <= g_sessions_n) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "%s", g_sessions[g_sess_idx - 1].title);
+            if (textinput_prompt("会话标题", buf, 1, 0, buf, sizeof(buf)) == 1) {
+                char err2[256] = {0};
+                if (harness_rename_session(&g_cfg, g_sessions[g_sess_idx - 1].session_id,
+                                           buf, err2, sizeof(err2)) == 0) {
+                    g_sess_loaded = 0;
+                    sessions_load();
+                } else {
+                    snprintf(g_sess_err, sizeof(g_sess_err), "%s",
+                             err2[0] ? err2 : "重命名失败");
+                }
+            }
+        }
+        g_dirty = 1;
+        return;
+    }
+    if (kDown & HidNpadButton_X) {
+        if (g_sess_idx > 0 && (size_t)g_sess_idx <= g_sessions_n) {
+            char fid[128] = "";
+            char err2[256] = {0};
+            if (harness_fork_session(&g_cfg, g_sessions[g_sess_idx - 1].session_id,
+                                     fid, sizeof(fid), err2, sizeof(err2)) == 0 && fid[0]) {
+                if (harness_use_session(&g_cfg, fid, err2, sizeof(err2)) == 0) {
+                    clear_msgs();
+                    add_msg(ROLE_ASSISTANT, "已分叉新会话(复制当前会话)。\nA 输入消息开始。", 1);
+                    g_screen = SCREEN_CHAT;
+                }
+            } else {
+                snprintf(g_sess_err, sizeof(g_sess_err), "%s",
+                         err2[0] ? err2 : "分叉失败");
+            }
+        }
+        g_dirty = 1;
+        return;
     }
     if (kDown & HidNpadButton_A) sessions_pick();
 }
@@ -1283,7 +1561,7 @@ static void render_sessions(void) {
         if (y > WIN_H - 100) break; /* 一屏装不下就截断 */
     }
 
-    const char *hint = "方向键 选择    A 打开    B 返回    + 退出";
+    const char *hint = "方向键 选择    A 打开    Y 重命名    X 分叉    B 返回    + 退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -1301,6 +1579,7 @@ static void enter_workspaces(int from_startup) {
     g_ws_loaded = 0;
     g_ws_idx = 0;
     g_ws_err[0] = '\0';
+    g_ws_confirm = -1;
     harness_workspaces_free(g_wss, g_wss_n);
     g_wss = NULL;
     g_wss_n = 0;
@@ -1324,13 +1603,38 @@ static void ws_input(u64 kDown) {
         g_want_exit = 1;
         return;
     }
+    if (g_ws_confirm >= 0) {
+        /* 删除确认态 */
+        if (kDown & HidNpadButton_A) {
+            size_t wi = (size_t)g_ws_confirm - 2;
+            if (wi < g_wss_n) {
+                char err2[256] = {0};
+                if (harness_delete_workspace(&g_cfg, g_wss[wi].workspace_id,
+                                             err2, sizeof(err2)) == 0) {
+                    g_ws_loaded = 0;
+                    g_ws_idx = 0;
+                    ws_load();
+                } else {
+                    snprintf(g_ws_err, sizeof(g_ws_err), "%s",
+                             err2[0] ? err2 : "删除失败");
+                }
+            }
+            g_ws_confirm = -1;
+            g_dirty = 1;
+        } else if (kDown & (HidNpadButton_B | HidNpadButton_X | HidNpadButton_Y)) {
+            g_ws_confirm = -1;
+            g_dirty = 1;
+        }
+        return;
+    }
     if (kDown & HidNpadButton_B) {
         g_screen = g_sess_from_startup ? SCREEN_CHOICE : SCREEN_CHAT;
         g_dirty = 1;
         return;
     }
     if (!g_ws_loaded) return;
-    int max_idx = (int)g_wss_n + 2; /* 0=新建会话 1=新建工作区 2..=工作区 +1=全部会话 */
+    int ws_count = (int)g_wss_n;
+    int max_idx = ws_count + 3; /* 0 新建 1 新工作区 2..n+1 工作区 n+2 搜索 n+3 全部 */
     int tidx = tap_row_index(HEADER_H + 16, 64, 8);
     if (tidx >= 0 && tidx <= max_idx) {
         g_ws_idx = tidx;
@@ -1344,6 +1648,61 @@ static void ws_input(u64 kDown) {
         if (g_ws_idx > 0) g_ws_idx--;
         g_dirty = 1;
     }
+
+    /* Y:重命名工作区 */
+    if (kDown & HidNpadButton_Y) {
+        if (g_ws_idx >= 2 && g_ws_idx <= ws_count + 1) {
+            size_t wi = (size_t)g_ws_idx - 2;
+            char buf[256];
+            snprintf(buf, sizeof(buf), "%s", g_wss[wi].title);
+            if (textinput_prompt("工作区标题", buf, 1, 0, buf, sizeof(buf)) == 1) {
+                char err2[256] = {0};
+                if (harness_rename_workspace(&g_cfg, g_wss[wi].workspace_id,
+                                             buf, err2, sizeof(err2)) == 0) {
+                    g_ws_loaded = 0;
+                    ws_load();
+                } else {
+                    snprintf(g_ws_err, sizeof(g_ws_err), "%s",
+                             err2[0] ? err2 : "重命名失败");
+                }
+            }
+        }
+        g_dirty = 1;
+        return;
+    }
+    /* X:删除工作区(需再按 A 确认) */
+    if (kDown & HidNpadButton_X) {
+        if (g_ws_idx >= 2 && g_ws_idx <= ws_count + 1) g_ws_confirm = g_ws_idx;
+        g_dirty = 1;
+        return;
+    }
+    /* ZL/ZR:排序 */
+    if (g_ws_idx >= 2 && g_ws_idx <= ws_count + 1) {
+        size_t wi = (size_t)g_ws_idx - 2;
+        const char *before = NULL;
+        int do_it = 0;
+        if (kDown & HidNpadButton_ZL) {
+            do_it = 1;
+            before = (wi > 0) ? g_wss[wi - 1].workspace_id : g_wss[wi].workspace_id;
+        } else if (kDown & HidNpadButton_ZR) {
+            do_it = 1;
+            before = (wi + 2 < g_wss_n) ? g_wss[wi + 2].workspace_id : NULL;
+        }
+        if (do_it) {
+            char err2[256] = {0};
+            if (harness_reorder_workspace(&g_cfg, g_wss[wi].workspace_id,
+                                          before, err2, sizeof(err2)) == 0) {
+                g_ws_loaded = 0;
+                ws_load();
+            } else {
+                snprintf(g_ws_err, sizeof(g_ws_err), "%s",
+                         err2[0] ? err2 : "排序失败");
+            }
+            g_dirty = 1;
+        }
+        return;
+    }
+
     if (!(kDown & HidNpadButton_A)) return;
 
     if (g_ws_idx == 0) {
@@ -1375,7 +1734,11 @@ static void ws_input(u64 kDown) {
         g_dirty = 1;
         return;
     }
-    if (g_ws_idx == max_idx) {
+    if (g_ws_idx == ws_count + 2) {
+        search_start();
+        return;
+    }
+    if (g_ws_idx == ws_count + 3) {
         g_sess_back = SCREEN_WORKSPACES;
         enter_sessions(0);
         return;
@@ -1491,10 +1854,30 @@ static void render_workspaces(void) {
         if (y > WIN_H - 140) break;
     }
 
-    /* 全部会话(平铺) */
+    /* 搜索会话 */
     {
         SDL_Rect row = { 24, y, WIN_W - 48, row_h };
         int sel = g_ws_idx == (int)g_wss_n + 2;
+        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                       (Sint16)(row.y + row.h), 10,
+                       sel ? COL_SURF2.r : COL_SURF.r,
+                       sel ? COL_SURF2.g : COL_SURF.g,
+                       sel ? COL_SURF2.b : COL_SURF.b, 255);
+        ts = TTF_RenderUTF8_Blended(g_font, "搜索会话", COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        y += row_h + 8;
+    }
+
+    /* 全部会话(平铺) */
+    {
+        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
+        int sel = g_ws_idx == (int)g_wss_n + 3;
         roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
                        (Sint16)(row.y + row.h), 10,
                        sel ? COL_SURF2.r : COL_SURF.r,
@@ -1510,7 +1893,17 @@ static void render_workspaces(void) {
         }
     }
 
-    const char *hint = "方向键 选择    A 打开/新建    B 返回    + 退出";
+    /* 删除确认态:选中行加红框 + 提示 */
+    if (g_ws_confirm >= 0 && g_ws_confirm <= (int)g_wss_n + 1) {
+        int cy = HEADER_H + 16 + g_ws_confirm * (row_h + 8);
+        roundedRectangleRGBA(g_ren, 24, (Sint16)cy, WIN_W - 24,
+                             (Sint16)(cy + row_h), 10,
+                             COL_RED.r, COL_RED.g, COL_RED.b, 255);
+    }
+
+    const char *hint = g_ws_confirm >= 0
+                           ? "再按 A 确认删除该工作区    B/X/Y 取消"
+                           : "方向键选择 A打开 Y改名 X删除 ZL/ZR排序 B返回 +退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -1599,11 +1992,14 @@ static void ws_sessions_pick(int row_idx) {
     clear_msgs();
     chat_message_t *msgs = NULL;
     size_t n = 0;
-    if (harness_fetch_history(&g_cfg, &msgs, &n, err, sizeof(err)) == 0) {
+    long long first = -1;
+    if (harness_fetch_history_ex(&g_cfg, 0, &msgs, &n, &first,
+                                 err, sizeof(err)) == 0) {
         for (size_t i = 0; i < n; i++)
             add_msg(msgs[i].role, msgs[i].content ? msgs[i].content : "", 1);
         for (size_t i = 0; i < n; i++) free(msgs[i].content);
         free(msgs);
+        g_first_seq = first;
     } else {
         add_msg(ROLE_ASSISTANT, "历史加载失败,从新消息开始。", 1);
     }
@@ -1636,6 +2032,46 @@ static void ws_sessions_input(u64 kDown) {
     if (kDown & HidNpadButton_Up) {
         if (g_wss_idx > 0) g_wss_idx--;
         g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_Y) {
+        if (g_wss_idx > 0 && (size_t)g_wss_idx <= g_wss_sessions_n) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "%s", g_wss_sessions[g_wss_idx - 1].title);
+            if (textinput_prompt("会话标题", buf, 1, 0, buf, sizeof(buf)) == 1) {
+                char err2[256] = {0};
+                if (harness_rename_session(&g_cfg,
+                                           g_wss_sessions[g_wss_idx - 1].session_id,
+                                           buf, err2, sizeof(err2)) == 0) {
+                    g_wss_loaded = 0;
+                    ws_sessions_load();
+                } else {
+                    snprintf(g_wss_err, sizeof(g_wss_err), "%s",
+                             err2[0] ? err2 : "重命名失败");
+                }
+            }
+        }
+        g_dirty = 1;
+        return;
+    }
+    if (kDown & HidNpadButton_X) {
+        if (g_wss_idx > 0 && (size_t)g_wss_idx <= g_wss_sessions_n) {
+            char fid[128] = "";
+            char err2[256] = {0};
+            if (harness_fork_session(&g_cfg,
+                                     g_wss_sessions[g_wss_idx - 1].session_id,
+                                     fid, sizeof(fid), err2, sizeof(err2)) == 0 && fid[0]) {
+                if (harness_use_session(&g_cfg, fid, err2, sizeof(err2)) == 0) {
+                    clear_msgs();
+                    add_msg(ROLE_ASSISTANT, "已分叉新会话(复制当前会话)。\nA 输入消息开始。", 1);
+                    g_screen = SCREEN_CHAT;
+                }
+            } else {
+                snprintf(g_wss_err, sizeof(g_wss_err), "%s",
+                         err2[0] ? err2 : "分叉失败");
+            }
+        }
+        g_dirty = 1;
+        return;
     }
     if (kDown & HidNpadButton_A) ws_sessions_pick(g_wss_idx);
 }
@@ -1741,7 +2177,7 @@ static void render_ws_sessions(void) {
         if (y > WIN_H - 100) break;
     }
 
-    const char *hint = "方向键 选择    A 打开/新建    B 返回工作区    + 退出";
+    const char *hint = "方向键 选择    A 打开    Y 重命名    X 分叉    B 返回工作区    + 退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -1771,6 +2207,7 @@ static void models_load(void) {
     char err[256] = {0};
     if (backend_list_models(&g_cfg, &g_models, &g_models_n,
                             g_cur_model, sizeof(g_cur_model),
+                            g_cur_effort, sizeof(g_cur_effort),
                             err, sizeof(err)) != 0) {
         snprintf(g_models_err, sizeof(g_models_err), "%s", err[0] ? err : "加载失败");
     } else {
@@ -1798,13 +2235,14 @@ static void models_input(u64 kDown) {
         return;
     }
     if (!g_models_loaded || g_models_n == 0) return;
+    int max_idx = (int)g_models_n + 1; /* 模型行 0..n-1,强度行 n/n+1 */
     int tidx = tap_row_index(HEADER_H + 16, 64, 8);
-    if (tidx >= 0 && tidx < (int)g_models_n) {
+    if (tidx >= 0 && tidx <= max_idx) {
         g_model_idx = tidx;
         kDown |= HidNpadButton_A;
     }
     if (kDown & HidNpadButton_Down) {
-        if (g_model_idx < (int)g_models_n - 1) g_model_idx++;
+        if (g_model_idx < max_idx) g_model_idx++;
         g_dirty = 1;
     }
     if (kDown & HidNpadButton_Up) {
@@ -1812,6 +2250,22 @@ static void models_input(u64 kDown) {
         g_dirty = 1;
     }
     if (!(kDown & HidNpadButton_A)) return;
+
+    if ((size_t)g_model_idx >= g_models_n) {
+        /* 推理强度 */
+        const char *effort = (g_model_idx == (int)g_models_n) ? "low" : "high";
+        char err[256] = {0};
+        if (backend_apply_effort(&g_cfg, effort, err, sizeof(err)) != 0) {
+            snprintf(g_models_err, sizeof(g_models_err), "%s",
+                     err[0] ? err : "设置失败");
+        } else {
+            snprintf(g_cur_effort, sizeof(g_cur_effort), "%s", effort);
+            if (strcmp(g_cfg.backend, "deepseek") == 0) config_save(&g_cfg);
+            models_load(); /* 刷新当前标记 */
+        }
+        g_dirty = 1;
+        return;
+    }
 
     char err[256] = {0};
     if (backend_apply_model(&g_cfg, g_models[g_model_idx].id, err, sizeof(err)) != 0) {
@@ -1926,6 +2380,38 @@ static void render_models(void) {
         if (y > WIN_H - 100) break;
     }
 
+    /* 推理强度两行 */
+    for (int e = 0; e < 2; e++) {
+        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
+        int idx = (int)g_models_n + e;
+        int sel = g_model_idx == idx;
+        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                       (Sint16)(row.y + row.h), 10,
+                       sel ? COL_SURF2.r : COL_SURF.r,
+                       sel ? COL_SURF2.g : COL_SURF.g,
+                       sel ? COL_SURF2.b : COL_SURF.b, 255);
+        const char *eff = e == 0 ? "low" : "high";
+        int is_cur = strcmp(g_cur_effort, eff) == 0;
+        if (is_cur)
+            roundedRectangleRGBA(g_ren, (Sint16)row.x, (Sint16)row.y,
+                                 (Sint16)(row.x + row.w), (Sint16)(row.y + row.h), 10,
+                                 COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
+        char label[200];
+        snprintf(label, sizeof(label), "推理强度:%s(%s)%s",
+                 e == 0 ? "低" : "高",
+                 e == 0 ? "少思考,响应快" : "多思考,更深入",
+                 is_cur ? " (当前)" : "");
+        ts = TTF_RenderUTF8_Blended(g_font, label, is_cur ? COL_BRAND : COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        y += row_h + 8;
+    }
+
     const char *hint = "方向键 选择    A 应用    B 返回    + 退出";
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
     if (ts) {
@@ -1935,6 +2421,237 @@ static void render_models(void) {
         SDL_DestroyTexture(tt);
         SDL_FreeSurface(ts);
     }
+}
+
+/* ---------- 搜索会话 ---------- */
+
+static harness_search_hit_t *g_search = NULL;
+static size_t g_search_n = 0;
+static int g_search_loaded = 0;
+static int g_search_idx = 0;
+static char g_search_err[256];
+static char g_last_query[256];
+
+static void search_start(void) {
+    char query[256] = "";
+    if (textinput_prompt("搜索会话内容", NULL, 1, 0, query, sizeof(query)) != 1)
+        return;
+    snprintf(g_last_query, sizeof(g_last_query), "%s", query);
+    g_search_loaded = 0;
+    g_search_idx = 0;
+    g_search_err[0] = '\0';
+    harness_search_free(g_search, g_search_n);
+    g_search = NULL;
+    g_search_n = 0;
+    g_screen = SCREEN_SEARCH;
+    g_dirty = 1;
+    search_load();
+}
+
+static void search_load(void) {
+    render_search();
+    g_dirty = 0;
+    char err[256] = {0};
+    if (harness_search_sessions(&g_cfg, g_last_query, &g_search, &g_search_n,
+                                err, sizeof(err)) != 0)
+        snprintf(g_search_err, sizeof(g_search_err), "%s", err[0] ? err : "搜索失败");
+    g_search_loaded = 1;
+    g_dirty = 1;
+}
+
+static void search_pick(int idx) {
+    if (idx < 0 || (size_t)idx >= g_search_n) return;
+    char err[256] = {0};
+    if (harness_use_session(&g_cfg, g_search[idx].session_id,
+                            err, sizeof(err)) != 0) {
+        snprintf(g_search_err, sizeof(g_search_err), "%s", err[0] ? err : "打开失败");
+        g_dirty = 1;
+        return;
+    }
+    clear_msgs();
+    chat_message_t *msgs = NULL;
+    size_t n = 0;
+    long long first = -1;
+    if (harness_fetch_history_ex(&g_cfg, 0, &msgs, &n, &first,
+                                 err, sizeof(err)) == 0) {
+        for (size_t i = 0; i < n; i++)
+            add_msg(msgs[i].role, msgs[i].content ? msgs[i].content : "", 1);
+        for (size_t i = 0; i < n; i++) free(msgs[i].content);
+        free(msgs);
+        g_first_seq = first;
+    } else {
+        add_msg(ROLE_ASSISTANT, "历史加载失败,从新消息开始。", 1);
+    }
+    if (g_nmsgs == 0)
+        add_msg(ROLE_ASSISTANT, "(该会话暂无聊天记录)\n按 A 开始输入。", 1);
+    g_screen = SCREEN_CHAT;
+    g_dirty = 1;
+}
+
+static void search_input(u64 kDown) {
+    if (kDown & HidNpadButton_Plus) {
+        g_want_exit = 1;
+        return;
+    }
+    if (kDown & HidNpadButton_B) {
+        enter_workspaces(g_sess_from_startup);
+        return;
+    }
+    if (!g_search_loaded) return;
+    int max_idx = (int)g_search_n - 1;
+    int tidx = tap_row_index(HEADER_H + 16, 64, 8);
+    if (tidx >= 0 && tidx <= max_idx) {
+        g_search_idx = tidx;
+        kDown |= HidNpadButton_A;
+    }
+    if (kDown & HidNpadButton_Down) {
+        if (g_search_idx < max_idx) g_search_idx++;
+        g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_Up) {
+        if (g_search_idx > 0) g_search_idx--;
+        g_dirty = 1;
+    }
+    if (kDown & HidNpadButton_A) search_pick(g_search_idx);
+}
+
+static void render_search(void) {
+    SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
+    SDL_RenderClear(g_ren);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+    SDL_Rect hdr = { 0, 0, WIN_W, HEADER_H };
+    SDL_RenderFillRect(g_ren, &hdr);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+    SDL_Rect hair = { 0, HEADER_H - 1, WIN_W, 1 };
+    SDL_RenderFillRect(g_ren, &hair);
+
+    char hdr_title[300];
+    snprintf(hdr_title, sizeof(hdr_title), "搜索结果:%s", g_last_query);
+    SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, hdr_title, COL_TEXT);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, (HEADER_H - ts->h) / 2, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+
+    const int row_h = 64;
+    int y = HEADER_H + 16;
+
+    if (!g_search_loaded && !g_search_err[0]) {
+        ts = TTF_RenderUTF8_Blended(g_font, "正在搜索…", COL_TEXT2);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        return;
+    }
+    if (g_search_err[0]) {
+        ts = TTF_RenderUTF8_Blended(g_font, g_search_err, COL_RED);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        return;
+    }
+    if (g_search_n == 0) {
+        ts = TTF_RenderUTF8_Blended(g_font, "没有匹配的会话", COL_TEXT2);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        return;
+    }
+
+    for (size_t i = 0; i < g_search_n; i++) {
+        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
+        int sel = (int)i == g_search_idx;
+        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                       (Sint16)(row.y + row.h), 10,
+                       sel ? COL_SURF2.r : COL_SURF.r,
+                       sel ? COL_SURF2.g : COL_SURF.g,
+                       sel ? COL_SURF2.b : COL_SURF.b, 255);
+        char text[256];
+        snprintf(text, sizeof(text), "%s", g_search[i].snippet);
+        size_t fit = utf8_fit_bytes(text, 220);
+        if (fit < strlen(text)) {
+            text[fit] = '\0';
+            strcat(text, "…");
+        }
+        ts = TTF_RenderUTF8_Blended(g_font, text, COL_TEXT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+        y += row_h + 8;
+        if (y > WIN_H - 100) break;
+    }
+
+    const char *hint = "方向键 选择    A 打开    B 返回工作区    + 退出";
+    ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, WIN_H - 48, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+}
+
+/* ---------- 历史翻页 ---------- */
+
+static void prepend_msgs(chat_message_t *msgs, size_t n) {
+    size_t keep = n;
+    if (g_nmsgs + keep > MAX_MSGS) keep = MAX_MSGS - g_nmsgs;
+    if (keep == 0) {
+        for (size_t i = 0; i < n; i++) free(msgs[i].content);
+        return;
+    }
+    for (size_t i = g_nmsgs; i-- > 0;) {
+        g_msgs[i + keep] = g_msgs[i];
+    }
+    g_nmsgs += keep;
+    size_t skip = n - keep;
+    for (size_t i = 0; i < keep; i++) {
+        msg_t *m = &g_msgs[i];
+        m->text = strdup(msgs[skip + i].content ? msgs[skip + i].content : "");
+        if (m->text) utf8_sanitize(m->text);
+        m->think = NULL;
+        m->tools = NULL;
+        m->notice = NULL;
+        m->role = msgs[skip + i].role;
+        m->done = 1;
+    }
+    for (size_t i = 0; i < n; i++) free(msgs[i].content);
+}
+
+static void chat_load_older(void) {
+    if (strcmp(g_cfg.backend, "harness") != 0) return;
+    chat_message_t *msgs = NULL;
+    size_t n = 0;
+    long long first = -1;
+    char err[256] = {0};
+    if (harness_fetch_history_ex(&g_cfg, g_first_seq, &msgs, &n, &first,
+                                 err, sizeof(err)) == 0 && n > 0) {
+        prepend_msgs(msgs, n);
+        g_first_seq = first;
+        g_stick_top = 1;
+        free(msgs);
+    }
+    g_dirty = 1;
 }
 
 /* ---------- 生命周期 ---------- */
@@ -2030,6 +2747,9 @@ int app_frame(void) {
     } else if (g_screen == SCREEN_MODELS) {
         if (!g_models_loaded && !g_models_err[0]) models_load();
         models_input(kDown);
+    } else if (g_screen == SCREEN_SEARCH) {
+        if (!g_search_loaded && !g_search_err[0]) search_load();
+        search_input(kDown);
     } else {
         /* 触摸:点底栏 = 输入消息 */
         if (g_tap_x >= 0) {
@@ -2068,6 +2788,22 @@ int app_frame(void) {
                         : "已切换后端:Harness(局域网)。\nX 工作区;L 选模型。",
                     1);
         }
+        /* B:停止生成 */
+        if ((kDown & HidNpadButton_B) && g_worker_busy) {
+            net_sse_cancel();
+            if (strcmp(g_cfg.backend, "harness") == 0) {
+                char cerr[256];
+                if (harness_cancel(&g_cfg, cerr, sizeof(cerr)) != 0)
+                    printf("cancel: %s\n", cerr);
+            }
+            printf("cancel requested\n");
+        }
+        /* ZL:加载更早历史 / ZR:回到最新 */
+        if ((kDown & HidNpadButton_ZL) && !g_worker_busy) chat_load_older();
+        if ((kDown & HidNpadButton_ZR) && !g_worker_busy) {
+            g_stick_top = 0;
+            g_dirty = 1;
+        }
         if ((kDown & HidNpadButton_Y) && !g_worker_busy) {
             g_set_idx = 0;
             g_screen = SCREEN_SETTINGS;
@@ -2084,6 +2820,7 @@ int app_frame(void) {
         else if (g_screen == SCREEN_WORKSPACES) render_workspaces();
         else if (g_screen == SCREEN_WS_SESSIONS) render_ws_sessions();
         else if (g_screen == SCREEN_MODELS) render_models();
+        else if (g_screen == SCREEN_SEARCH) render_search();
         else render_chat();
         g_dirty = 0;
     }
@@ -2095,6 +2832,8 @@ void app_exit(void) {
     for (int i = 0; i < g_nmsgs; i++) {
         free(g_msgs[i].text);
         free(g_msgs[i].think);
+        free(g_msgs[i].tools);
+        free(g_msgs[i].notice);
     }
     g_nmsgs = 0;
     harness_sessions_free(g_sessions, g_sessions_n);
@@ -2109,6 +2848,9 @@ void app_exit(void) {
     backend_models_free(g_models, g_models_n);
     g_models = NULL;
     g_models_n = 0;
+    harness_search_free(g_search, g_search_n);
+    g_search = NULL;
+    g_search_n = 0;
     app_event_t ev;
     while (pop_event(&ev)) free(ev.text);
     if (g_q_mtx) SDL_DestroyMutex(g_q_mtx);

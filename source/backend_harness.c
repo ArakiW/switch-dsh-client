@@ -223,12 +223,55 @@ static int on_sse_line(const char *line, void *ud) {
                             }
                         }
                         /* tool-call-delta / usage:忽略 */
+                    } else if (strcmp(etype->valuestring, "tool/call") == 0) {
+                        /* 工具活动 */
+                        const cJSON *name = cJSON_GetObjectItemCaseSensitive(data, "name");
+                        if (cJSON_IsString(name) && name->valuestring[0]) {
+                            if (c->on_chunk) c->on_chunk(name->valuestring, 2, c->ud);
+                        }
+                    } else if (strcmp(etype->valuestring, "todo/write") == 0) {
+                        /* 任务清单(整串替换) */
+                        const cJSON *todos = cJSON_GetObjectItemCaseSensitive(data, "todos");
+                        if (cJSON_IsArray(todos)) {
+                            size_t nt = cJSON_GetArraySize(todos);
+                            size_t done = 0;
+                            char pending[256] = "";
+                            for (size_t t = 0; t < nt; t++) {
+                                const cJSON *item = cJSON_GetArrayItem(todos, t);
+                                const cJSON *status = cJSON_GetObjectItemCaseSensitive(item, "status");
+                                const cJSON *content = cJSON_GetObjectItemCaseSensitive(item, "content");
+                                if (cJSON_IsString(status) &&
+                                    strcmp(status->valuestring, "completed") == 0)
+                                    done++;
+                                else if (cJSON_IsString(content) && !pending[0]) {
+                                    snprintf(pending, sizeof(pending), "%s", content->valuestring);
+                                    utf8_sanitize(pending);
+                                }
+                            }
+                            if (nt > 0) {
+                                char sum[512];
+                                snprintf(sum, sizeof(sum), "任务 %zu/%zu 完成%s%s",
+                                         done, nt, pending[0] ? " · 进行中:" : "",
+                                         pending[0] ? pending : "");
+                                if (c->on_chunk) c->on_chunk(sum, 4, c->ud);
+                            }
+                        }
                     } else if (strcmp(etype->valuestring, "assistant/message") == 0 ||
                                strcmp(etype->valuestring, "turn/end") == 0) {
                         c->finished = 1;
                         stop = 1;
                     }
                 }
+            } else if (strcmp(ptype->valuestring, "approval/requested") == 0) {
+                const cJSON *tool = cJSON_GetObjectItemCaseSensitive(payload, "toolName");
+                char sum[256];
+                if (cJSON_IsString(tool) && tool->valuestring[0])
+                    snprintf(sum, sizeof(sum), "需在电脑端批准工具调用:%s", tool->valuestring);
+                else
+                    snprintf(sum, sizeof(sum), "需在电脑端处理审批请求");
+                if (c->on_chunk) c->on_chunk(sum, 3, c->ud);
+            } else if (strcmp(ptype->valuestring, "question/requested") == 0) {
+                if (c->on_chunk) c->on_chunk("需在电脑端回答提问", 3, c->ud);
             } else if (strcmp(ptype->valuestring, "stream/error") == 0) {
                 const cJSON *e = cJSON_GetObjectItemCaseSensitive(payload, "error");
                 if (cJSON_IsString(e)) snprintf(c->err, sizeof(c->err), "%s", e->valuestring);
@@ -300,6 +343,7 @@ static int harness_chat(const backend_config_t *cfg,
 
     if (on_done) {
         if (rc != 0) on_done(0, err[0] ? err : "事件流中断", ud);
+        else if (net_sse_aborted()) on_done(1, NULL, ud); /* 用户主动停止 */
         else if (ctx.err[0]) on_done(0, ctx.err, ud);
         else on_done(1, NULL, ud);
     }
@@ -427,11 +471,12 @@ static void append_text_parts(const cJSON *content, char **buf, size_t *len) {
     }
 }
 
-int harness_fetch_history(const backend_config_t *cfg,
-                          chat_message_t **out_msgs, size_t *out_n,
-                          char *err, size_t errsz) {
+int harness_fetch_history_ex(const backend_config_t *cfg, long long before_seq,
+                             chat_message_t **out_msgs, size_t *out_n,
+                             long long *first_seq, char *err, size_t errsz) {
     *out_msgs = NULL;
     *out_n = 0;
+    if (first_seq) *first_seq = -1;
 
     if (!g_session) {
         if (ensure_session(cfg, err, errsz, 0) != 0) return -1;
@@ -440,6 +485,7 @@ int harness_fetch_history(const backend_config_t *cfg,
     cJSON *payload = cJSON_CreateObject();
     cJSON_AddStringToObject(payload, "sessionId", g_session);
     cJSON_AddNumberToObject(payload, "maxMessages", 50);
+    if (before_seq > 0) cJSON_AddNumberToObject(payload, "beforeSeq", (double)before_seq);
     cJSON *val = NULL;
     if (rpc(g_base, "session.history", payload, &val, err, errsz) != 0) return -1;
 
@@ -448,7 +494,10 @@ int harness_fetch_history(const backend_config_t *cfg,
 
     /* 扫描全部事件,用环形缓冲保留最后 64 条 user/assistant 消息 */
     chat_message_t *msgs = (chat_message_t *)calloc(64, sizeof(*msgs));
-    if (!msgs) {
+    long long *seqs = (long long *)calloc(64, sizeof(*seqs));
+    if (!msgs || !seqs) {
+        free(msgs);
+        free(seqs);
         cJSON_Delete(val);
         if (err && errsz) snprintf(err, errsz, "内存不足");
         return -1;
@@ -481,6 +530,8 @@ int harness_fetch_history(const backend_config_t *cfg,
             free(msgs[slot].content);
             msgs[slot].role = (chat_role_t)role;
             msgs[slot].content = text;
+            const cJSON *seq = cJSON_GetObjectItemCaseSensitive(ev, "seq");
+            seqs[slot] = cJSON_IsNumber(seq) ? (long long)seq->valuedouble : -1;
             m_total++;
         } else {
             free(text);
@@ -493,12 +544,25 @@ int harness_fetch_history(const backend_config_t *cfg,
         /* 旋转:最旧消息挪到下标 0 */
         size_t rot = m_total % 64;
         chat_message_t tmp[64];
+        long long tseq[64];
         memcpy(tmp, msgs, sizeof(tmp));
-        for (size_t i = 0; i < 64; i++) msgs[i] = tmp[(i + rot) % 64];
+        memcpy(tseq, seqs, sizeof(tseq));
+        for (size_t i = 0; i < 64; i++) {
+            msgs[i] = tmp[(i + rot) % 64];
+            seqs[i] = tseq[(i + rot) % 64];
+        }
     }
+    if (first_seq) *first_seq = m > 0 ? seqs[0] : -1;
+    free(seqs);
     *out_msgs = msgs;
     *out_n = m;
     return 0;
+}
+
+int harness_fetch_history(const backend_config_t *cfg,
+                          chat_message_t **out_msgs, size_t *out_n,
+                          char *err, size_t errsz) {
+    return harness_fetch_history_ex(cfg, 0, out_msgs, out_n, NULL, err, errsz);
 }
 
 /* ---------- 工作区 ---------- */
@@ -617,12 +681,15 @@ int harness_new_session_in(const backend_config_t *cfg, const char *workspace_id
 
 /* ---------- 模型 ---------- */
 
-int harness_list_models(const backend_config_t *cfg,
-                        model_option_t **out, size_t *out_n,
-                        char *cur, size_t cursz, char *err, size_t errsz) {
+int harness_list_models_ex(const backend_config_t *cfg,
+                           model_option_t **out, size_t *out_n,
+                           char *cur, size_t cursz,
+                           char *cur_effort, size_t cur_effort_sz,
+                           char *err, size_t errsz) {
     *out = NULL;
     *out_n = 0;
     if (cur && cursz) cur[0] = '\0';
+    if (cur_effort && cur_effort_sz) cur_effort[0] = '\0';
 
     if (ensure_session(cfg, err, errsz, 0) != 0) return -1;
 
@@ -636,6 +703,9 @@ int harness_list_models(const backend_config_t *cfg,
         const cJSON *cm = cJSON_GetObjectItemCaseSensitive(current, "model");
         if (cur && cursz && cJSON_IsString(cm))
             snprintf(cur, cursz, "%s", cm->valuestring);
+        const cJSON *ce = cJSON_GetObjectItemCaseSensitive(current, "reasoningEffort");
+        if (cur_effort && cur_effort_sz && cJSON_IsString(ce))
+            snprintf(cur_effort, cur_effort_sz, "%s", ce->valuestring);
     }
 
     const cJSON *groups = cJSON_GetObjectItemCaseSensitive(val, "groups");
@@ -695,6 +765,13 @@ void harness_models_free(model_option_t *list, size_t n) {
     free(list);
 }
 
+int harness_list_models(const backend_config_t *cfg,
+                        model_option_t **out, size_t *out_n,
+                        char *cur, size_t cursz, char *err, size_t errsz) {
+    return harness_list_models_ex(cfg, out, out_n, cur, cursz,
+                                  NULL, 0, err, errsz);
+}
+
 int harness_select_model(const backend_config_t *cfg,
                          const char *provider, const char *model,
                          char *err, size_t errsz) {
@@ -703,6 +780,181 @@ int harness_select_model(const backend_config_t *cfg,
     cJSON_AddStringToObject(payload, "sessionId", g_session);
     cJSON_AddStringToObject(payload, "provider", provider ? provider : "");
     cJSON_AddStringToObject(payload, "model", model ? model : "");
+    cJSON *val = NULL;
+    int rc = rpc(g_base, "session.selectModel", payload, &val, err, errsz);
+    cJSON_Delete(val);
+    return rc;
+}
+
+/* ---------- 会话操作 ---------- */
+
+int harness_cancel(const backend_config_t *cfg, char *err, size_t errsz) {
+    (void)cfg;
+    if (!g_base || !g_session) return 0; /* 无会话可取消 */
+    cJSON *payload = cJSON_CreateObject();
+    cJSON_AddStringToObject(payload, "sessionId", g_session);
+    cJSON *val = NULL;
+    int rc = rpc(g_base, "session.cancel", payload, &val, err, errsz);
+    cJSON_Delete(val);
+    return rc;
+}
+
+int harness_rename_session(const backend_config_t *cfg, const char *session_id,
+                           const char *title, char *err, size_t errsz) {
+    char *base = normalize_base(cfg);
+    if (!base) {
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+    cJSON *payload = cJSON_CreateObject();
+    cJSON_AddStringToObject(payload, "sessionId", session_id ? session_id : "");
+    cJSON_AddStringToObject(payload, "title", title ? title : "");
+    cJSON *val = NULL;
+    int rc = rpc(base, "session.rename", payload, &val, err, errsz);
+    free(base);
+    cJSON_Delete(val);
+    return rc;
+}
+
+int harness_fork_session(const backend_config_t *cfg, const char *session_id,
+                         char *forked_id, size_t forked_sz,
+                         char *err, size_t errsz) {
+    if (forked_id && forked_sz) forked_id[0] = '\0';
+    char *base = normalize_base(cfg);
+    if (!base) {
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+    cJSON *payload = cJSON_CreateObject();
+    cJSON_AddStringToObject(payload, "sessionId", session_id ? session_id : "");
+    cJSON *val = NULL;
+    int rc = rpc(base, "session.fork", payload, &val, err, errsz);
+    free(base);
+    if (rc == 0) {
+        const cJSON *sid = val ? cJSON_GetObjectItemCaseSensitive(val, "sessionId") : NULL;
+        if (cJSON_IsString(sid) && forked_id && forked_sz)
+            snprintf(forked_id, forked_sz, "%s", sid->valuestring);
+    }
+    cJSON_Delete(val);
+    return rc;
+}
+
+int harness_search_sessions(const backend_config_t *cfg, const char *query,
+                            harness_search_hit_t **out, size_t *out_n,
+                            char *err, size_t errsz) {
+    *out = NULL;
+    *out_n = 0;
+    char *base = normalize_base(cfg);
+    if (!base) {
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+    cJSON *payload = cJSON_CreateObject();
+    cJSON_AddStringToObject(payload, "query", query ? query : "");
+    cJSON *val = NULL;
+    int rc = rpc(base, "session.search", payload, &val, err, errsz);
+    free(base);
+    if (rc != 0) return -1;
+
+    const cJSON *items = val ? cJSON_GetObjectItemCaseSensitive(val, "items") : NULL;
+    size_t n = cJSON_IsArray(items) ? cJSON_GetArraySize(items) : 0;
+    harness_search_hit_t *list = (harness_search_hit_t *)calloc(n ? n : 1, sizeof(*list));
+    if (!list) {
+        cJSON_Delete(val);
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        const cJSON *it = cJSON_GetArrayItem(items, i);
+        const cJSON *sid = cJSON_GetObjectItemCaseSensitive(it, "sessionId");
+        const cJSON *snip = cJSON_GetObjectItemCaseSensitive(it, "snippet");
+        if (!cJSON_IsString(sid)) continue;
+        list[k].session_id = strdup(sid->valuestring);
+        list[k].snippet = cJSON_IsString(snip) ? strdup(snip->valuestring) : strdup("");
+        utf8_sanitize(list[k].snippet);
+        k++;
+    }
+    cJSON_Delete(val);
+    *out = list;
+    *out_n = k;
+    return 0;
+}
+
+void harness_search_free(harness_search_hit_t *list, size_t n) {
+    if (!list) return;
+    for (size_t i = 0; i < n; i++) {
+        free(list[i].session_id);
+        free(list[i].snippet);
+    }
+    free(list);
+}
+
+/* ---------- 工作区操作 ---------- */
+
+int harness_rename_workspace(const backend_config_t *cfg, const char *workspace_id,
+                             const char *title, char *err, size_t errsz) {
+    char *base = normalize_base(cfg);
+    if (!base) {
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+    cJSON *payload = cJSON_CreateObject();
+    cJSON_AddStringToObject(payload, "workspaceId", workspace_id ? workspace_id : "");
+    cJSON_AddStringToObject(payload, "title", title ? title : "");
+    cJSON *val = NULL;
+    int rc = rpc(base, "workspace.rename", payload, &val, err, errsz);
+    free(base);
+    cJSON_Delete(val);
+    return rc;
+}
+
+int harness_delete_workspace(const backend_config_t *cfg, const char *workspace_id,
+                             char *err, size_t errsz) {
+    char *base = normalize_base(cfg);
+    if (!base) {
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+    cJSON *payload = cJSON_CreateObject();
+    cJSON_AddStringToObject(payload, "workspaceId", workspace_id ? workspace_id : "");
+    cJSON *val = NULL;
+    int rc = rpc(base, "workspace.delete", payload, &val, err, errsz);
+    free(base);
+    cJSON_Delete(val);
+    return rc;
+}
+
+int harness_reorder_workspace(const backend_config_t *cfg, const char *workspace_id,
+                              const char *before_workspace_id,
+                              char *err, size_t errsz) {
+    char *base = normalize_base(cfg);
+    if (!base) {
+        if (err && errsz) snprintf(err, errsz, "内存不足");
+        return -1;
+    }
+    cJSON *payload = cJSON_CreateObject();
+    cJSON_AddStringToObject(payload, "workspaceId", workspace_id ? workspace_id : "");
+    if (before_workspace_id && before_workspace_id[0])
+        cJSON_AddStringToObject(payload, "beforeWorkspaceId", before_workspace_id);
+    cJSON *val = NULL;
+    int rc = rpc(base, "workspace.insertBefore", payload, &val, err, errsz);
+    free(base);
+    cJSON_Delete(val);
+    return rc;
+}
+
+/* ---------- 模型(带推理强度) ---------- */
+
+int harness_select_model_ex(const backend_config_t *cfg,
+                            const char *provider, const char *model,
+                            const char *effort, char *err, size_t errsz) {
+    if (ensure_session(cfg, err, errsz, 0) != 0) return -1;
+    cJSON *payload = cJSON_CreateObject();
+    cJSON_AddStringToObject(payload, "sessionId", g_session);
+    cJSON_AddStringToObject(payload, "provider", provider ? provider : "");
+    cJSON_AddStringToObject(payload, "model", model ? model : "");
+    if (effort && effort[0]) cJSON_AddStringToObject(payload, "reasoningEffort", effort);
     cJSON *val = NULL;
     int rc = rpc(g_base, "session.selectModel", payload, &val, err, errsz);
     cJSON_Delete(val);
