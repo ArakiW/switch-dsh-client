@@ -5,7 +5,7 @@
 #include "textinput.h"
 
 int textinput_prompt(const char *header, const char *initial, int zh_only,
-                     char *out, size_t outsz) {
+                     int password, char *out, size_t outsz) {
     if (!out || outsz == 0) return -1;
     out[0] = '\0';
 
@@ -13,7 +13,8 @@ int textinput_prompt(const char *header, const char *initial, int zh_only,
     Result rc = swkbdCreate(&kbd, 0);
     if (R_FAILED(rc)) return -1;
 
-    swkbdConfigMakePresetDefault(&kbd);
+    if (password) swkbdConfigMakePresetPassword(&kbd);
+    else swkbdConfigMakePresetDefault(&kbd);
     swkbdConfigSetType(&kbd, zh_only ? SwkbdType_ZhHans : SwkbdType_Normal);
     if (header && header[0]) swkbdConfigSetHeaderText(&kbd, header);
     if (initial && initial[0]) swkbdConfigSetInitialText(&kbd, initial);

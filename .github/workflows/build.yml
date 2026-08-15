@@ -19,7 +19,8 @@ jobs:
           dkp-pacman -S --noconfirm --needed \
             switch-sdl2 switch-sdl2_ttf switch-sdl2_image \
             switch-curl switch-mbedtls \
-            switch-freetype switch-zlib switch-libpng switch-libjpeg-turbo
+            switch-freetype switch-harfbuzz switch-zlib switch-libpng \
+            switch-libjpeg-turbo switch-bzip2
 
       - name: Build
         run: make -j$(nproc)

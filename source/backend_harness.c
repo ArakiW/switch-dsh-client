@@ -9,19 +9,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __SWITCH__
 #include <switch.h>
+#else
+#include "switch_compat.h" /* host 测试兼容 */
+#endif
 
 #include "backend.h"
 #include "net.h"
 #include "cJSON.h"
 
+#ifdef __SWITCH__
 #define SESSION_FILE "sdmc:/switch/switch-dsh-client/session_id.txt"
+#endif
 
 static char *g_base = NULL;    /* 去尾斜杠后的 harness_base_url */
 static char *g_session = NULL; /* 会话 id(session-<uuid>) */
 
-/* ---------- 会话持久化 ---------- */
+/* ---------- 会话持久化(仅 Switch;host 测试每次新建会话) ---------- */
 
+#ifdef __SWITCH__
 static void save_session(const char *id) {
     FILE *f = fopen(SESSION_FILE, "wb");
     if (f) {
@@ -40,6 +47,10 @@ static char *load_session(void) {
     buf[n] = '\0';
     return strdup(buf);
 }
+#else
+static void save_session(const char *id) { (void)id; }
+static char *load_session(void) { return NULL; }
+#endif
 
 /* ---------- 工具 ---------- */
 
