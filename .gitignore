@@ -1,0 +1,14 @@
+# devkitPro 构建产物
+*.nro
+*.elf
+*.elf.strip
+*.nacp
+*.nso
+*.npdm
+*.pfs0
+*.kip
+*.lst
+*.map
+
+build/
+out/

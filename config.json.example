@@ -1,0 +1,9 @@
+{
+  "backend": "harness",
+  "harness_base_url": "http://192.168.1.10:8765",
+  "deepseek_base_url": "https://api.deepseek.com",
+  "deepseek_api_key": "",
+  "model": "deepseek-v4-pro",
+  "deepseek_thinking": "disabled",
+  "system_prompt": ""
+}

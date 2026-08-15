@@ -1,0 +1,68 @@
+#ifndef SWITCH_DSH_BACKEND_H
+#define SWITCH_DSH_BACKEND_H
+
+#include <stddef.h>
+
+/*
+ * 后端抽象接口。
+ *
+ * 一期两个实现:
+ *   - backend_harness.c  局域网 DeepSeek Harness(HTTP,协议见 DSH_API_SPEC.md)
+ *   - backend_deepseek.c DeepSeek 官方 API(HTTPS + SSE)
+ *
+ * 二期:backend 侧预留语音转写接口(本地 Whisper HTTP 服务),通过
+ * 独立的 stt_*.c 接入,不走本接口。
+ */
+
+typedef enum {
+    ROLE_USER = 0,
+    ROLE_ASSISTANT = 1,
+} chat_role_t;
+
+typedef struct {
+    chat_role_t role;
+    char *content; /* UTF-8,以 \0 结尾 */
+} chat_message_t;
+
+/* 后端连接配置(与 config.json 对应,见 config.h 的加载函数) */
+typedef struct {
+    char *backend;            /* "harness" | "deepseek" */
+    char *harness_base_url;   /* 如 http://192.168.1.10:3080 */
+    char *deepseek_base_url;  /* 如 https://api.deepseek.com */
+    char *deepseek_api_key;
+    char *model;              /* deepseek-v4-flash / deepseek-v4-pro 等 */
+    char *deepseek_thinking;  /* "enabled" | "disabled"(默认) */
+    char *system_prompt;      /* 可为 NULL 或空串 */
+} backend_config_t;
+
+/*
+ * 流式回调。
+ * 注意:实现可在后台线程中调用这两个回调,调用方(UI)必须自行
+ * 把数据投递到主线程(互斥队列),不要在回调里直接碰 SDL 纹理。
+ */
+typedef void (*backend_chunk_cb)(const char *delta, void *userdata);
+typedef void (*backend_done_cb)(int ok, const char *error, void *userdata);
+
+/*
+ * 发送一轮对话。history 为完整消息历史(不含本轮的新助手回复),
+ * n_history 为其长度。实现负责:
+ *   - 组装请求(含 system_prompt、model 等)
+ *   - 流式接收时逐个 delta 调 on_chunk
+ *   - 结束时调 on_done(ok=1 成功;失败时 error 为可展示的 UTF-8 字符串)
+ * 返回值:0 表示已启动(结果通过回调异步到达),非 0 表示启动失败
+ * (此时不会调用任何回调)。
+ */
+typedef int (*backend_chat_fn)(const backend_config_t *cfg,
+                               const chat_message_t *history, size_t n_history,
+                               backend_chunk_cb on_chunk,
+                               backend_done_cb on_done, void *userdata);
+
+typedef struct {
+    const char *name;     /* 展示名,如 "Harness" / "DeepSeek" */
+    backend_chat_fn chat;
+} backend_vtable_t;
+
+/* 按 cfg->backend 选择实现,未知值回退到 harness */
+const backend_vtable_t *backend_resolve(const backend_config_t *cfg);
+
+#endif /* SWITCH_DSH_BACKEND_H */
