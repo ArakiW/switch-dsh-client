@@ -465,8 +465,8 @@ static void render_chat(void) {
 
     const char *hint = g_worker_busy ? "回复中…请稍候    + 退出"
                        : (strcmp(g_cfg.backend, "harness") == 0
-                          ? "A 输入    X 工作区    Y 设置    L 模型    + 退出"
-                          : "A 输入    X 清屏    Y 设置    L 模型    + 退出");
+                          ? "A 输入  X 工作区  Y 设置  L 模型  R 切后端  + 退出"
+                          : "A 输入  X 清屏  Y 设置  L 模型  R 切后端  + 退出");
     ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -487,6 +487,40 @@ static void render_chat(void) {
             SDL_FreeSurface(ts);
         }
     }
+}
+
+/* ---------- 输入:手柄 + 触摸屏 ---------- */
+
+static int g_tap_x = -1;
+static int g_tap_y = -1;
+
+static void poll_events(void) {
+    g_tap_x = -1;
+    g_tap_y = -1;
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        if (ev.type == SDL_MOUSEBUTTONDOWN &&
+            ev.button.button == SDL_BUTTON_LEFT) {
+            g_tap_x = ev.button.x;
+            g_tap_y = ev.button.y;
+        }
+#ifdef SDL_FINGERDOWN
+        else if (ev.type == SDL_FINGERDOWN) {
+            g_tap_x = (int)(ev.tfinger.x * (float)WIN_W);
+            g_tap_y = (int)(ev.tfinger.y * (float)WIN_H);
+        }
+#endif
+    }
+}
+
+/* 通用列表点击:计算行号并触发 A */
+static int tap_row_index(int y0, int row_h, int gap) {
+    if (g_tap_x < 0) return -1;
+    int idx = (g_tap_y - y0) / (row_h + gap);
+    g_tap_x = -1;
+    g_tap_y = -1;
+    if (idx < 0) return -1;
+    return idx;
 }
 
 /* ---------- 设置界面 ---------- */
@@ -544,6 +578,17 @@ static void settings_input(u64 kDown) {
     if (kDown & HidNpadButton_Plus) {
         g_want_exit = 1;
         return;
+    }
+    /* 触摸:点行 = 选中并触发 */
+    if (g_tap_x >= 0) {
+        int y0 = HEADER_H + 20;
+        int idx = (g_tap_y - y0) / 76;
+        if (g_tap_y >= y0 && idx >= 0 && idx < SET_COUNT) {
+            g_set_idx = idx;
+            kDown |= HidNpadButton_A;
+        }
+        g_tap_x = -1;
+        g_tap_y = -1;
     }
     if (kDown & HidNpadButton_B) {
         config_save(&g_cfg);
@@ -660,6 +705,20 @@ static void choice_input(u64 kDown) {
     if (kDown & HidNpadButton_Plus) {
         g_want_exit = 1;
         return;
+    }
+    /* 触摸:点卡片 = 选中并确认 */
+    if (g_tap_x >= 0) {
+        for (int i = 0; i < 2; i++) {
+            SDL_Rect card = { 140, 200 + i * 190, WIN_W - 280, 160 };
+            if (g_tap_x >= card.x && g_tap_x <= card.x + card.w &&
+                g_tap_y >= card.y && g_tap_y <= card.y + card.h) {
+                g_choice_idx = i;
+                kDown |= HidNpadButton_A;
+                break;
+            }
+        }
+        g_tap_x = -1;
+        g_tap_y = -1;
     }
     if ((kDown & (HidNpadButton_Up | HidNpadButton_Down)) ||
         (kDown & (HidNpadButton_Left | HidNpadButton_Right))) {
@@ -858,6 +917,11 @@ static void sessions_input(u64 kDown) {
     }
     if (!g_sess_loaded) return;
     int max_idx = (int)g_sessions_n; /* 0 = 新建会话 */
+    int tidx = tap_row_index(HEADER_H + 16, 64, 8);
+    if (tidx >= 0 && tidx <= max_idx) {
+        g_sess_idx = tidx;
+        kDown |= HidNpadButton_A;
+    }
     if (kDown & HidNpadButton_Down) {
         if (g_sess_idx < max_idx) g_sess_idx++;
         g_dirty = 1;
@@ -1040,6 +1104,11 @@ static void ws_input(u64 kDown) {
     }
     if (!g_ws_loaded) return;
     int max_idx = (int)g_wss_n + 2; /* 0=新建会话 1=新建工作区 2..=工作区 +1=全部会话 */
+    int tidx = tap_row_index(HEADER_H + 16, 64, 8);
+    if (tidx >= 0 && tidx <= max_idx) {
+        g_ws_idx = tidx;
+        kDown |= HidNpadButton_A;
+    }
     if (kDown & HidNpadButton_Down) {
         if (g_ws_idx < max_idx) g_ws_idx++;
         g_dirty = 1;
@@ -1328,6 +1397,11 @@ static void ws_sessions_input(u64 kDown) {
     }
     if (!g_wss_loaded) return;
     int max_idx = (int)g_wss_sessions_n;
+    int tidx = tap_row_index(HEADER_H + 16, 64, 8);
+    if (tidx >= 0 && tidx <= max_idx) {
+        g_wss_idx = tidx;
+        kDown |= HidNpadButton_A;
+    }
     if (kDown & HidNpadButton_Down) {
         if (g_wss_idx < max_idx) g_wss_idx++;
         g_dirty = 1;
@@ -1497,6 +1571,11 @@ static void models_input(u64 kDown) {
         return;
     }
     if (!g_models_loaded || g_models_n == 0) return;
+    int tidx = tap_row_index(HEADER_H + 16, 64, 8);
+    if (tidx >= 0 && tidx < (int)g_models_n) {
+        g_model_idx = tidx;
+        kDown |= HidNpadButton_A;
+    }
     if (kDown & HidNpadButton_Down) {
         if (g_model_idx < (int)g_models_n - 1) g_model_idx++;
         g_dirty = 1;
@@ -1683,6 +1762,7 @@ int app_init(void) {
 }
 
 int app_frame(void) {
+    poll_events();
     padUpdate(&g_pad);
     u64 kDown = padGetButtonsDown(&g_pad);
 
@@ -1706,6 +1786,12 @@ int app_frame(void) {
         if (!g_models_loaded && !g_models_err[0]) models_load();
         models_input(kDown);
     } else {
+        /* 触摸:点底栏 = 输入消息 */
+        if (g_tap_x >= 0) {
+            if (g_tap_y >= WIN_H - FOOTER_H) kDown |= HidNpadButton_A;
+            g_tap_x = -1;
+            g_tap_y = -1;
+        }
         if ((kDown & HidNpadButton_A) && !g_worker_busy) {
             if (textinput_prompt("输入消息", NULL, 1, 0, g_input, sizeof(g_input)) == 1) {
                 add_msg(ROLE_USER, g_input, 1);
@@ -1720,6 +1806,22 @@ int app_frame(void) {
         }
         if ((kDown & HidNpadButton_L) && !g_worker_busy) {
             enter_models();
+        }
+        /* R:一键切换后端(DSH <-> DeepSeek) */
+        if ((kDown & HidNpadButton_R) && !g_worker_busy) {
+            const char *nb = strcmp(g_cfg.backend, "deepseek") == 0
+                                 ? "harness" : "deepseek";
+            free(g_cfg.backend);
+            g_cfg.backend = strdup(nb);
+            config_save(&g_cfg);
+            snprintf(g_cur_model, sizeof(g_cur_model), "%s",
+                     g_cfg.model ? g_cfg.model : "");
+            printf("toggle backend -> %s\n", g_cfg.backend);
+            add_msg(ROLE_ASSISTANT,
+                    strcmp(nb, "deepseek") == 0
+                        ? "已切换后端:DeepSeek(官方 API)。\nX 清屏;L 选模型。"
+                        : "已切换后端:Harness(局域网)。\nX 工作区;L 选模型。",
+                    1);
         }
         if ((kDown & HidNpadButton_Y) && !g_worker_busy) {
             g_set_idx = 0;
