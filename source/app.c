@@ -430,6 +430,8 @@ static void draw_line(TTF_Font *font, SDL_Color col, int x, int y,
     SDL_FreeSurface(surf);
 }
 
+static void clamp_scroll(int max_off);
+
 /* ---------- Markdown-lite 渲染 ---------- */
 
 static void strip_md_markers(const char *src, char *dst, size_t dstsz) {
@@ -2857,8 +2859,7 @@ int app_frame(void) {
             int step = 0;
             if (held & HidNpadButton_Up) step += 14;
             if (held & HidNpadButton_Down) step -= 14;
-            HidAnalogStickState stickl, stickr;
-            padGetStickPos(&g_pad, &stickl, &stickr);
+            HidAnalogStickState stickr = padGetStickPos(&g_pad, 1); /* 右摇杆 */
             if (stickr.y > 8000 || stickr.y < -8000) step += stickr.y / 1200;
             if (step != 0) {
                 g_scroll_offset += step;
