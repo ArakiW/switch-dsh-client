@@ -1236,7 +1236,10 @@ static void render_chat(void) {
 
     /* 左侧栏(默认显示,桌面版布局) */
     ensure_sidebar_tex();
-    if (g_sb_tex) SDL_RenderCopy(g_ren, g_sb_tex, NULL, NULL);
+    if (g_sb_tex) {
+        SDL_Rect sbd = { 0, 0, SB_W, WIN_H };
+        SDL_RenderCopy(g_ren, g_sb_tex, NULL, &sbd);
+    }
 
     /* 顶栏(缓存纹理,会话标题) */
     ensure_header_tex();
