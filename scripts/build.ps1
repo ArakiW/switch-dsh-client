@@ -23,6 +23,28 @@ $newlibPic = Join-Path $toolRoot 'devkitA64\aarch64-none-elf\lib\pic'
 
 New-Item -ItemType Directory -Force -Path $build | Out-Null
 
+# ---- Static render guards (fail the build on known stretch/full-target bugs) ----
+$appSrc = [System.IO.File]::ReadAllText((Join-Path $repo 'source\app.c'))
+
+# Guard 1: RenderCopy with NULL destination stretches the texture to the whole
+# render target (caused the "giant text" bug). Dest rect must always be explicit.
+if ($appSrc -match 'SDL_RenderCopy\([^;]*,\s*NULL\s*,\s*NULL\s*\)') {
+    throw 'guard: SDL_RenderCopy with NULL destination (stretches to full render target) found in app.c'
+}
+
+# Guard 2: RenderFillRect with NULL rect fills the whole target silently.
+if ($appSrc -match 'SDL_RenderFillRect\([^;]*,\s*NULL\s*\)') {
+    throw 'guard: SDL_RenderFillRect with NULL rect found in app.c'
+}
+
+# Guard 3: every render-target switch must be reset (leak detector).
+$rtTotal = ([regex]::Matches($appSrc, 'SDL_SetRenderTarget\(g_ren,')).Count
+$rtResets = ([regex]::Matches($appSrc, 'SDL_SetRenderTarget\(g_ren,\s*NULL')).Count
+$rtSets = $rtTotal - $rtResets
+if ($rtSets -ne $rtResets) {
+    throw "guard: unbalanced SDL_SetRenderTarget in app.c ($rtSets sets vs $rtResets resets)"
+}
+
 $common = @(
     '--target=aarch64-none-elf','-D__SWITCH__','-D_REENTRANT',
     '-march=armv8-a+crc+crypto','-mcpu=cortex-a57','-mtp=tpidrro_el0',
