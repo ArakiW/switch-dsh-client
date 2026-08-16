@@ -564,6 +564,75 @@ static int render_md_text(int maxw, int lineh, int x, int y, const char *text,
     return cy - y;
 }
 
+/*
+ * 单条消息按"桌面版对话流"排版(无气泡):
+ *   - 用户:"你" 标签(品牌蓝)+ 正文
+ *   - 助手:思考(暗色 + 左侧竖线缩进)→ 工具行(次级色)→ 处理提示(红)→ 正文
+ * measure_only=1 时只测量。返回高度;*maxw_out 为最宽行。
+ */
+static int render_msg_flow(int x0, int maxw, int lineh, int y, msg_t *m,
+                           int measure_only, int *maxw_out) {
+    int cy = y;
+    *maxw_out = 0;
+    int w2 = 0;
+
+    if (m->role == ROLE_USER) {
+        if (!measure_only) {
+            SDL_Surface *s = TTF_RenderUTF8_Blended(g_font_hint, "你", COL_BRAND);
+            if (s) {
+                SDL_Texture *t = SDL_CreateTextureFromSurface(g_ren, s);
+                SDL_Rect d = { x0, cy, s->w, s->h };
+                SDL_RenderCopy(g_ren, t, NULL, &d);
+                SDL_DestroyTexture(t);
+                SDL_FreeSurface(s);
+            }
+        }
+        cy += TTF_FontHeight(g_font_hint) + 6;
+        if (m->text && m->text[0]) {
+            int h2 = render_md_text(maxw, lineh, x0, cy, m->text,
+                                    COL_TEXT, COL_WHITE, measure_only, &w2);
+            if (w2 > *maxw_out) *maxw_out = w2;
+            cy += h2;
+        }
+        return cy - y;
+    }
+
+    /* 助手:思考(缩进 + 竖线) */
+    if (m->think && m->think[0]) {
+        int h2 = render_md_text(maxw - 12, lineh, x0 + 12, cy, m->think,
+                                COL_TEXT3, COL_TEXT3, measure_only, &w2);
+        if (!measure_only) {
+            SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+            SDL_Rect bar = { x0, cy, 2, h2 };
+            SDL_RenderFillRect(g_ren, &bar);
+        }
+        if (w2 > *maxw_out) *maxw_out = w2;
+        cy += h2 + 8;
+    }
+    /* 工具活动行 */
+    if (m->tools && m->tools[0]) {
+        int h2 = render_md_text(maxw, lineh, x0, cy, m->tools,
+                                COL_TEXT2, COL_TEXT2, measure_only, &w2);
+        if (w2 > *maxw_out) *maxw_out = w2;
+        cy += h2 + 8;
+    }
+    /* 处理提示(红) */
+    if (m->notice && m->notice[0]) {
+        int h2 = render_md_text(maxw, lineh, x0, cy, m->notice,
+                                COL_RED, COL_RED, measure_only, &w2);
+        if (w2 > *maxw_out) *maxw_out = w2;
+        cy += h2 + 8;
+    }
+    /* 正文 */
+    if (m->text && m->text[0]) {
+        int h2 = render_md_text(maxw, lineh, x0, cy, m->text,
+                                COL_TEXT, COL_WHITE, measure_only, &w2);
+        if (w2 > *maxw_out) *maxw_out = w2;
+        cy += h2;
+    }
+    return cy - y;
+}
+
 /* ---------- 渲染 ---------- */
 
 static void render_chat(void) {
@@ -608,44 +677,28 @@ static void render_chat(void) {
     /* 消息区 */
     const int area_y0 = HEADER_H + 10;
     const int area_y1 = WIN_H - FOOTER_H - 8;
-    const int mx = 40;
-    const int maxw = WIN_W - mx * 2 - 40; /* 文本最大宽度 */
     const int lineh = TTF_FontHeight(g_font) + 6;
-    const int pad_x = 14;
-    const int pad_y = 10;
+    const int content_x = 200;
+    const int cmaxw = WIN_W - content_x * 2 - 24;
 
     /* 任务清单条(顶部浮层) */
     if (g_todos_str[0]) {
         int wout = 0;
-        int th2 = render_md_text(maxw + 80, lineh, 40, HEADER_H + 8,
+        int th2 = render_md_text(cmaxw, lineh, content_x, HEADER_H + 8,
                                  g_todos_str, COL_TEXT3, COL_TEXT3, 1, &wout);
         SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
-        SDL_Rect tbg = { 24, HEADER_H + 4, WIN_W - 48, th2 + 8 };
+        SDL_Rect tbg = { content_x - 12, HEADER_H + 4, WIN_W - (content_x - 12) * 2, th2 + 8 };
         SDL_RenderFillRect(g_ren, &tbg);
-        render_md_text(maxw + 80, lineh, 40, HEADER_H + 8,
+        render_md_text(cmaxw, lineh, content_x, HEADER_H + 8,
                        g_todos_str, COL_TEXT3, COL_TEXT3, 0, &wout);
     }
 
-    /* 先测总高(正文 markdown + 思考 + 工具 + 提示),自动贴底 */
+    /* 先测总高(桌面版对话流) */
     int total_h = 0;
     for (int i = 0; i < g_nmsgs; i++) {
-        msg_t *mm = &g_msgs[i];
-        int tw = 0, th = 0;
-        if (mm->text && mm->text[0])
-            th = render_md_text(maxw, lineh, 0, 0, mm->text,
-                                COL_TEXT, COL_WHITE, 1, &tw);
-        int tnl = 0;
-        if (mm->think && mm->think[0])
-            tnl = wrap_text(g_font, maxw, mm->think, NULL, MAX_LINES);
-        int toolh = 0, noth = 0, tmpw = 0;
-        if (mm->tools && mm->tools[0])
-            toolh = render_md_text(maxw, lineh, 0, 0, mm->tools,
-                                   COL_TEXT2, COL_TEXT2, 1, &tmpw);
-        if (mm->notice && mm->notice[0])
-            noth = render_md_text(maxw, lineh, 0, 0, mm->notice,
-                                  COL_RED, COL_RED, 1, &tmpw);
-        total_h += th + toolh + noth + tnl * lineh + pad_y * 2 + 12
-                 + (tnl > 0 ? 10 : 0) + ((toolh > 0 || noth > 0) ? 10 : 0);
+        int mw = 0;
+        total_h += render_msg_flow(content_x, cmaxw, lineh, 0,
+                                   &g_msgs[i], 1, &mw) + 18;
     }
     int view_h = area_y1 - area_y0;
     int max_off = total_h > view_h ? total_h - view_h : 0;
@@ -653,102 +706,20 @@ static void render_chat(void) {
     int y = area_y0 + g_scroll_offset - (total_h > view_h ? total_h - view_h : 0);
 
     for (int i = 0; i < g_nmsgs; i++) {
-        msg_t *m = &g_msgs[i];
+        int mw = 0;
+        int hh = render_msg_flow(content_x, cmaxw, lineh, y, &g_msgs[i], 0, &mw);
+        y += hh + 18;
+    }
 
-        /* 测量各段 */
-        int tw = 0, th = 0;
-        if (m->text && m->text[0])
-            th = render_md_text(maxw, lineh, 0, 0, m->text,
-                                (m->role == ROLE_USER) ? COL_WHITE : COL_TEXT,
-                                COL_WHITE, 1, &tw);
-        wrap_line_t tlines[MAX_LINES];
-        int tnl = 0;
-        if (m->think && m->think[0])
-            tnl = wrap_text(g_font, maxw, m->think, tlines, MAX_LINES);
-        int tlw = 0;
-        for (int j = 0; j < tnl; j++) {
-            char buf[MAX_LINE_LEN];
-            size_t len = tlines[j].len;
-            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            memcpy(buf, m->think + tlines[j].off, len);
-            buf[len] = '\0';
-            int w = 0, h = 0;
-            TTF_SizeUTF8(g_font, buf, &w, &h);
-            if (w > tlw) tlw = w;
-        }
-        int toolw = 0, toolh = 0, notw = 0, noth = 0;
-        if (m->tools && m->tools[0])
-            toolh = render_md_text(maxw, lineh, 0, 0, m->tools,
-                                   COL_TEXT2, COL_TEXT2, 1, &toolw);
-        if (m->notice && m->notice[0])
-            noth = render_md_text(maxw, lineh, 0, 0, m->notice,
-                                  COL_RED, COL_RED, 1, &notw);
-
-        int bw = tw;
-        if (tlw > bw) bw = tlw;
-        if (toolw > bw) bw = toolw;
-        if (notw > bw) bw = notw;
-        int bh = th + toolh + noth + tnl * lineh + pad_y * 2
-               + (tnl > 0 ? 10 : 0) + ((toolh > 0 || noth > 0) ? 10 : 0);
-        if (bh <= pad_y * 2) continue;
-        int bx = (m->role == ROLE_USER) ? (WIN_W - mx - bw - pad_x * 2) : mx;
-
-        /* Harness 风格圆角气泡:用户=品牌蓝,助手=surface+发丝边框 */
-        if (y > -32000 && y < 32000) {
-            if (m->role == ROLE_USER) {
-                roundedBoxRGBA(g_ren, (Sint16)bx, (Sint16)y,
-                               (Sint16)(bx + bw + pad_x * 2), (Sint16)(y + bh), 12,
-                               COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
-            } else {
-                roundedBoxRGBA(g_ren, (Sint16)bx, (Sint16)y,
-                               (Sint16)(bx + bw + pad_x * 2), (Sint16)(y + bh), 12,
-                               COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
-                roundedRectangleRGBA(g_ren, (Sint16)bx, (Sint16)y,
-                                     (Sint16)(bx + bw + pad_x * 2), (Sint16)(y + bh), 12,
-                                     COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
-            }
-        }
-
-        int ty = y + pad_y;
-        /* 思考过程(暗色,带分隔线) */
-        if (tnl > 0) {
-            for (int j = 0; j < tnl; j++) {
-                draw_line(g_font, COL_TEXT3, bx + pad_x, ty + j * lineh,
-                          m->think, tlines[j].off, tlines[j].len);
-            }
-            SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
-            SDL_Rect div = { bx + pad_x, ty + tnl * lineh + 4, bw, 1 };
-            SDL_RenderFillRect(g_ren, &div);
-            ty += tnl * lineh + 10;
-        }
-        /* 工具活动 */
-        if (toolh > 0) {
-            int wout = 0;
-            render_md_text(maxw, lineh, bx + pad_x, ty, m->tools,
-                           COL_TEXT2, COL_TEXT2, 0, &wout);
-            ty += toolh;
-        }
-        /* 处理提示(红) */
-        if (noth > 0) {
-            int wout = 0;
-            render_md_text(maxw, lineh, bx + pad_x, ty, m->notice,
-                           COL_RED, COL_RED, 0, &wout);
-            ty += noth;
-        }
-        if (toolh > 0 || noth > 0) {
-            SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
-            SDL_Rect div = { bx + pad_x, ty + 3, bw, 1 };
-            SDL_RenderFillRect(g_ren, &div);
-            ty += 10;
-        }
-        /* 正文(markdown-lite) */
-        if (th > 0) {
-            int wout = 0;
-            render_md_text(maxw, lineh, bx + pad_x, ty, m->text,
-                           (m->role == ROLE_USER) ? COL_WHITE : COL_TEXT,
-                           COL_WHITE, 0, &wout);
-        }
-        y += bh + 12;
+    /* 滚动条 */
+    if (max_off > 0) {
+        int track_h = view_h - 8;
+        int thumb_h = track_h * view_h / total_h;
+        if (thumb_h < 24) thumb_h = 24;
+        int thumb_y = area_y0 + 4 + (track_h - thumb_h) * g_scroll_offset / max_off;
+        roundedBoxRGBA(g_ren, WIN_W - 12, (Sint16)thumb_y,
+                       WIN_W - 6, (Sint16)(thumb_y + thumb_h), 3,
+                       COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 200);
     }
 
     /* 底栏(composer 风格:surface + 顶部发丝线) */
@@ -796,8 +767,11 @@ static int g_tap_y = -1;
 static int g_drag = 0;
 static int g_drag_moved = 0;
 static int g_drag_start_y = 0;
+static int g_drag_start_x = 0;
 static int g_drag_last_y = 0;
+static int g_drag_last_x = 0;
 static int g_drag_start_offset = 0;
+static u32 g_touch_prev = 0;
 
 static void clamp_scroll(int max_off) {
     if (g_scroll_offset < 0) g_scroll_offset = 0;
@@ -856,6 +830,40 @@ static void poll_events(void) {
             g_drag = 0;
         }
 #endif
+    }
+
+    /* 原始 hid 触摸(真机上最可靠,绕过 SDL 触摸映射) */
+    {
+        HidTouchScreenState ts;
+        memset(&ts, 0, sizeof(ts));
+        hidGetTouchScreenStates(&ts, 1);
+        u32 cnt = ts.count;
+        if (cnt > 0 && g_touch_prev == 0) {
+            g_drag = 1;
+            g_drag_moved = 0;
+            g_drag_start_y = (int)ts.touches[0].y;
+            g_drag_start_x = (int)ts.touches[0].x;
+            g_drag_last_y = g_drag_start_y;
+            g_drag_last_x = g_drag_start_x;
+            g_drag_start_offset = g_scroll_offset;
+        } else if (cnt > 0 && g_drag) {
+            int cy2 = (int)ts.touches[0].y;
+            int dy = g_drag_last_y - cy2;
+            if (dy > 8 || dy < -8) g_drag_moved = 1;
+            if (g_drag_moved && g_screen == SCREEN_CHAT) {
+                g_scroll_offset = g_drag_start_offset + (g_drag_start_y - cy2);
+                g_dirty = 1;
+            }
+            g_drag_last_y = cy2;
+            g_drag_last_x = (int)ts.touches[0].x;
+        } else if (cnt == 0 && g_touch_prev > 0 && g_drag) {
+            if (!g_drag_moved) {
+                g_tap_x = g_drag_last_x;
+                g_tap_y = g_drag_last_y;
+            }
+            g_drag = 0;
+        }
+        g_touch_prev = cnt;
     }
 }
 
@@ -2761,6 +2769,7 @@ int app_init(void) {
 
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     padInitializeDefault(&g_pad);
+    hidInitializeTouchScreen();
 
     g_q_mtx = SDL_CreateMutex();
     if (!g_q_mtx) return -1;
