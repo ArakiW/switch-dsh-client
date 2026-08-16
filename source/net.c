@@ -132,7 +132,7 @@ int net_post_json(const char *url, const char *body, net_buffer_t *out,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, buf_write);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 60000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 15000L); /* LAN 操作 15s 上限,避免冻屏 */
 
     CURLcode rc = curl_easy_perform(curl);
     if (http_code) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, http_code);

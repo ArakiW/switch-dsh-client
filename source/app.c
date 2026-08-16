@@ -143,6 +143,15 @@ static int g_sb_idx = 0;
 static char g_sess_title[128] = "新会话";
 static screen_t g_prev_screen = SCREEN_CHOICE;
 
+/* 侧栏后台加载(不阻塞主线程) */
+static volatile int g_sb_loading = 0;
+static volatile int g_sb_ready = 0;
+static harness_workspace_t *g_sb_tmp_wss = NULL;
+static size_t g_sb_tmp_wss_n = 0;
+static harness_session_t *g_sb_tmp_sess = NULL;
+static size_t g_sb_tmp_sess_n = 0;
+static char g_sb_err[256];
+
 /* 配色对齐 DeepSeek Harness Web 暗色主题(design-platform.css) */
 static const SDL_Color COL_BG    = {  21,  21,  23, 255 }; /* bg-base (bluish-950) */
 static const SDL_Color COL_SURF  = {  27,  27,  28, 255 }; /* sidebar/layer-1 (bluish-900) */
@@ -878,21 +887,69 @@ static void sb_build_rows(void) {
     g_sb_rows_n++;
 }
 
-static void sb_load(void) {
+static int sb_thread_fn(void *arg) {
+    (void)arg;
     char err[256] = {0};
-    if (strcmp(g_cfg.backend, "harness") == 0) {
-        harness_workspaces_free(g_wss, g_wss_n);
-        g_wss = NULL;
-        g_wss_n = 0;
-        harness_sessions_free(g_sessions, g_sessions_n);
-        g_sessions = NULL;
-        g_sessions_n = 0;
-        harness_list_workspaces(&g_cfg, &g_wss, &g_wss_n, err, sizeof(err));
-        harness_list_sessions(&g_cfg, &g_sessions, &g_sessions_n, err, sizeof(err));
+    harness_workspace_t *w = NULL;
+    size_t wn = 0;
+    harness_session_t *s = NULL;
+    size_t sn = 0;
+    harness_list_workspaces(&g_cfg, &w, &wn, err, sizeof(err));
+    harness_list_sessions(&g_cfg, &s, &sn, err, sizeof(err));
+    g_sb_tmp_wss = w;
+    g_sb_tmp_wss_n = wn;
+    g_sb_tmp_sess = s;
+    g_sb_tmp_sess_n = sn;
+    g_sb_ready = 1;
+    return 0;
+}
+
+static void sb_load(void) {
+    if (g_sb_loading) return;
+    g_sb_err[0] = '\0';
+    if (strcmp(g_cfg.backend, "deepseek") == 0) {
+        /* 无会话列表,即时完成 */
+        sb_build_rows();
+        g_sb_loaded = 1;
+        g_dirty = 1;
+        return;
     }
-    sb_build_rows();
-    g_sb_idx = 0;
-    g_sb_loaded = 1;
+    g_sb_loading = 1;
+    g_sb_ready = 0;
+    SDL_Thread *th = SDL_CreateThread(sb_thread_fn, "sb", NULL);
+    if (th) {
+        SDL_DetachThread(th);
+    } else {
+        g_sb_loading = 0;
+        g_sb_loaded = 1; /* 线程失败也放行,避免卡死 */
+        g_dirty = 1;
+    }
+}
+
+/* 主线程收口:后台列表就绪后原子替换 */
+static void sb_apply_ready(void) {
+    if (!g_sb_loading || !g_sb_ready) return;
+    if (strcmp(g_cfg.backend, "harness") != 0) {
+        /* 加载期间切换了后端:丢弃过期结果 */
+        harness_workspaces_free(g_sb_tmp_wss, g_sb_tmp_wss_n);
+        harness_sessions_free(g_sb_tmp_sess, g_sb_tmp_sess_n);
+    } else {
+        harness_workspaces_free(g_wss, g_wss_n);
+        g_wss = g_sb_tmp_wss;
+        g_wss_n = g_sb_tmp_wss_n;
+        harness_sessions_free(g_sessions, g_sessions_n);
+        g_sessions = g_sb_tmp_sess;
+        g_sessions_n = g_sb_tmp_sess_n;
+        sb_build_rows();
+        g_sb_idx = 0;
+        g_sb_loaded = 1;
+    }
+    g_sb_tmp_wss = NULL;
+    g_sb_tmp_wss_n = 0;
+    g_sb_tmp_sess = NULL;
+    g_sb_tmp_sess_n = 0;
+    g_sb_loading = 0;
+    g_sb_ready = 0;
     g_dirty = 1;
 }
 
@@ -900,7 +957,9 @@ static void ensure_sidebar_tex(void) {
     const char *cur = harness_current_session();
     if (!cur) cur = "";
     int rev = (strcmp(g_cfg.backend, "deepseek") == 0 ? 1 : 0) + g_focus * 2 +
-              g_sb_idx * 8 + (g_sb_loaded ? 16 : 0) + (g_drag_in_sb ? 32 : 0);
+              g_sb_idx * 8 + (g_sb_loaded ? 16 : 0) + (g_sb_loading ? 32 : 0) +
+              (g_drag_in_sb ? 64 : 0);
+    for (const char *p = g_sb_err; *p; p++) rev = rev * 31 + (unsigned char)*p;
     for (const char *p = cur; *p; p++) rev = rev * 31 + (unsigned char)*p;
     for (int i = 0; i < g_sb_rows_n; i++) {
         if (g_sb_rows[i].kind == 1 && (size_t)g_sb_rows[i].idx < g_sessions_n)
@@ -923,6 +982,14 @@ static void ensure_sidebar_tex(void) {
     SDL_Rect hair = { SB_W - 1, 0, 1, WIN_H };
     SDL_RenderFillRect(g_ren, &hair);
 
+    /* 侧栏焦点:品牌蓝描边,状态一目了然 */
+    if (g_focus) {
+        roundedRectangleRGBA(g_ren, 2, 2, SB_W - 2, WIN_H - 2, 10,
+                             COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
+        roundedRectangleRGBA(g_ren, 3, 3, SB_W - 3, WIN_H - 3, 9,
+                             COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
+    }
+
     /* LOGO + 名称 */
     if (g_logo_tex) {
         SDL_Rect ld = { 10, 8, 36, 36 };
@@ -942,6 +1009,11 @@ static void ensure_sidebar_tex(void) {
     /* 行 */
     int y = 92;
     int fi = 0;
+    if (g_sb_loading || !g_sb_loaded) {
+        draw_line(g_font_hint, COL_TEXT2, 16, y, "正在加载会话…",
+                  0, strlen("正在加载会话…"));
+        y += 26;
+    }
     for (int i = 0; i < g_sb_rows_n; i++) {
         sb_row_t *r = &g_sb_rows[i];
         if (r->kind == 4) {
@@ -990,6 +1062,9 @@ static void ensure_sidebar_tex(void) {
     }
     g_sb_focus_n = fi;
 
+    if (g_sb_err[0])
+        draw_trunc(g_font_hint, g_sb_err, COL_RED, 16, WIN_H - 52, SB_W - 32);
+
     draw_line(g_font_hint, COL_TEXT3, 16, WIN_H - 26, "X 焦点切换  Y 设置  R 切后端",
               0, strlen("X 焦点切换  Y 设置  R 切后端"));
     SDL_SetRenderTarget(g_ren, NULL);
@@ -1016,6 +1091,9 @@ static void sb_activate(int fi) {
                 add_msg(ROLE_ASSISTANT, "已新建会话。\nA 输入消息开始。", 1);
                 snprintf(g_sess_title, sizeof(g_sess_title), "新会话");
                 save_current_history();
+            } else {
+                snprintf(g_sb_err, sizeof(g_sb_err), "%s",
+                         err[0] ? err : "新建会话失败(桥接未运行?)");
             }
         } else {
             clear_msgs();
@@ -1031,7 +1109,12 @@ static void sb_activate(int fi) {
         if ((size_t)r->idx >= g_sessions_n) return;
         harness_session_t *s = &g_sessions[r->idx];
         char err[256] = {0};
-        if (harness_use_session(&g_cfg, s->session_id, err, sizeof(err)) != 0) return;
+        if (harness_use_session(&g_cfg, s->session_id, err, sizeof(err)) != 0) {
+            snprintf(g_sb_err, sizeof(g_sb_err), "%s",
+                     err[0] ? err : "切换失败(桥接未运行?)");
+            g_dirty = 1;
+            return;
+        }
         clear_msgs();
         chat_message_t *msgs = NULL;
         size_t n = 0;
@@ -1186,7 +1269,7 @@ static void ensure_footer_tex(void) {
     int be = strcmp(g_cfg.backend, "harness") == 0 ? 1 : 0;
     int streaming = (g_nmsgs > 0 && g_msgs[g_nmsgs - 1].role == ROLE_ASSISTANT &&
                      !g_msgs[g_nmsgs - 1].done) ? 1 : 0;
-    int rev = busy * 1000 + th * 100 + be * 10 + streaming;
+    int rev = busy * 1000 + th * 100 + be * 10 + streaming + (g_focus ? 100000 : 0);
     if (rev == g_ftr_rev && g_ftr_tex) return;
     if (g_ftr_tex) SDL_DestroyTexture(g_ftr_tex);
     g_ftr_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA8888,
@@ -1199,12 +1282,14 @@ static void ensure_footer_tex(void) {
     SDL_Rect fhair = { 0, 0, WIN_W, 1 };
     SDL_RenderFillRect(g_ren, &fhair);
 
-    const char *hint = busy
-                           ? (th ? "思考中…(B 停止)    + 退出"
-                                 : "回复中…(B 停止)    + 退出")
-                           : (be
-                              ? "A输入 B停止 X工作区 Y设置 L模型 R后端 ZL更早 ZR最新 +退出"
-                              : "A输入 B停止 X清屏 Y设置 L模型 R后端 +退出");
+    const char *hint;
+    if (g_focus)
+        hint = "侧栏模式:方向键选择  A 打开  B 返回对话  R 切后端  Y 设置";
+    else if (busy)
+        hint = th ? "思考中…(B 停止)    + 退出" : "回复中…(B 停止)    + 退出";
+    else
+        hint = be ? "A输入 B停止 X侧栏 Y设置 L模型 R后端 ZL更早 ZR最新 +退出"
+                  : "A输入 B停止 X侧栏 Y设置 L模型 R后端 +退出";
     SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -3398,9 +3483,10 @@ int app_frame(void) {
         if (!g_search_loaded && !g_search_err[0]) search_load();
         search_input(kDown);
     } else {
-        /* 侧栏数据懒加载 + 自动恢复上次会话 */
+        /* 侧栏数据懒加载(后台线程)+ 自动恢复上次会话 */
         if (g_prev_screen != SCREEN_CHAT) g_sb_loaded = 0;
         if (!g_sb_loaded) sb_load();
+        sb_apply_ready();
         if (!g_chat_resumed && strcmp(g_cfg.backend, "harness") == 0 &&
             !g_worker_busy) {
             g_chat_resumed = 1;
@@ -3418,7 +3504,7 @@ int app_frame(void) {
             g_tap_y = -1;
         }
 
-        /* 侧栏焦点导航 */
+        /* 侧栏焦点导航(公共按键不拦截) */
         if (g_focus) {
             if (kDown & HidNpadButton_Up) sb_nav(-1);
             if (kDown & HidNpadButton_Down) sb_nav(1);
@@ -3427,10 +3513,9 @@ int app_frame(void) {
                 g_focus = 0;
                 g_dirty = 1;
             }
-            return 0; /* 焦点帧跳过对话逻辑与渲染 */
         }
 
-        if ((kDown & HidNpadButton_A) && !g_worker_busy) {
+        if (!g_focus && (kDown & HidNpadButton_A) && !g_worker_busy) {
             if (textinput_prompt("输入消息", NULL, 1, 0, g_input, sizeof(g_input)) == 1) {
                 add_msg(ROLE_USER, g_input, 1);
                 add_msg(ROLE_ASSISTANT, "", 0); /* 流式占位 */
@@ -3438,7 +3523,7 @@ int app_frame(void) {
             }
         }
         if ((kDown & HidNpadButton_X) && !g_worker_busy) {
-            g_focus = 1;
+            g_focus = !g_focus;
             g_dirty = 1;
         }
         if ((kDown & HidNpadButton_L) && !g_worker_busy) {
@@ -3491,8 +3576,8 @@ int app_frame(void) {
             g_scroll_offset = 0;
             g_dirty = 1;
         }
-        /* 方向键 / 右摇杆滚动历史 */
-        {
+        /* 方向键 / 右摇杆滚动历史(侧栏焦点时不滚) */
+        if (!g_focus) {
             u64 held = padGetButtons(&g_pad);
             int step = 0;
             if (held & HidNpadButton_Up) step += 14;
