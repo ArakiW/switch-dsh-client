@@ -840,6 +840,27 @@ static void draw_trunc(TTF_Font *font, const char *text, SDL_Color col,
     draw_line(font, col, x, y, buf, 0, strlen(buf));
 }
 
+/* 右对齐像素级截断:x_right 为文本右边缘 */
+static void draw_trunc_right(TTF_Font *font, const char *text, SDL_Color col,
+                             int x_right, int y, int maxw) {
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", text);
+    for (;;) {
+        int w = 0, h = 0;
+        TTF_SizeUTF8(font, buf, &w, &h);
+        if (w <= maxw) break;
+        size_t len = strlen(buf);
+        if (len <= 1) break;
+        size_t cut = utf8_fit_bytes(buf, len - 2);
+        if (cut == 0 || cut >= len) break;
+        buf[cut] = '\0';
+        strcat(buf, "…");
+    }
+    int w = 0, h = 0;
+    TTF_SizeUTF8(font, buf, &w, &h);
+    draw_line(font, col, x_right - w, y, buf, 0, strlen(buf));
+}
+
 static void sb_build_rows(void) {
     g_sb_rows_n = 0;
     g_sb_rows[g_sb_rows_n].kind = 0;
@@ -1054,7 +1075,7 @@ static void ensure_sidebar_tex(void) {
             draw_trunc(g_font_hint, s->title, tc, 20, y + 6, SB_W - 60);
             if (s->running) draw_line(g_font_hint, COL_GREEN, 20, y + 28, "运行中", 0, 9);
         } else if (r->kind == 2) {
-            draw_line(g_font_hint, COL_TEXT, 20, y + 12, "工作区管理", 0, 12);
+            draw_line(g_font_hint, COL_TEXT, 20, y + 12, "工作区管理", 0, strlen("工作区管理"));
         } else if (r->kind == 3) {
             draw_line(g_font_hint, COL_TEXT, 20, y + 12, "设置", 0, 6);
         }
@@ -1241,24 +1262,14 @@ static void ensure_header_tex(void) {
 
     char title[160];
     snprintf(title, sizeof(title), "%s", g_sess_title);
-    SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, title, COL_TEXT);
-    if (ts) {
-        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-        SDL_Rect d = { 20, (HEADER_H - ts->h) / 2, ts->w, ts->h };
-        SDL_RenderCopy(g_ren, tt, NULL, &d);
-        SDL_DestroyTexture(tt);
-        SDL_FreeSurface(ts);
-    }
+    draw_trunc(g_font_title, title, COL_TEXT, 20,
+               (HEADER_H - TTF_FontHeight(g_font_title)) / 2,
+               (WIN_W - SB_W) - 20 - 340); /* 右侧预留后端/模型标签 */
     snprintf(title, sizeof(title), "%s · %s",
              strcmp(g_cfg.backend, "deepseek") == 0 ? "DeepSeek" : "Harness", mp);
-    ts = TTF_RenderUTF8_Blended(g_font_hint, title, COL_ACCENT);
-    if (ts) {
-        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-        SDL_Rect d = { WIN_W - SB_W - ts->w - 24, (HEADER_H - ts->h) / 2, ts->w, ts->h };
-        SDL_RenderCopy(g_ren, tt, NULL, &d);
-        SDL_DestroyTexture(tt);
-        SDL_FreeSurface(ts);
-    }
+    draw_trunc_right(g_font_hint, title, COL_ACCENT,
+                     WIN_W - SB_W - 24, (HEADER_H - TTF_FontHeight(g_font_hint)) / 2,
+                     360);
     SDL_SetRenderTarget(g_ren, NULL);
     g_hdr_rev = rev;
 }
@@ -1279,7 +1290,7 @@ static void ensure_footer_tex(void) {
     SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
     SDL_RenderClear(g_ren);
     SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
-    SDL_Rect fhair = { 0, 0, WIN_W, 1 };
+    SDL_Rect fhair = { 0, 0, WIN_W - SB_W, 1 };
     SDL_RenderFillRect(g_ren, &fhair);
 
     const char *hint;
@@ -1290,17 +1301,12 @@ static void ensure_footer_tex(void) {
     else
         hint = be ? "A输入 B停止 X侧栏 Y设置 L模型 R后端 ZL更早 ZR最新 +退出"
                   : "A输入 B停止 X侧栏 Y设置 L模型 R后端 +退出";
-    SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
-    if (ts) {
-        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-        SDL_Rect d = { 24, (FOOTER_H - ts->h) / 2, ts->w, ts->h };
-        SDL_RenderCopy(g_ren, tt, NULL, &d);
-        SDL_DestroyTexture(tt);
-        SDL_FreeSurface(ts);
-    }
+    int hint_max = WIN_W - SB_W - 48 - (streaming ? 170 : 24);
+    draw_trunc(g_font_hint, hint, COL_HINT, 24,
+               (FOOTER_H - TTF_FontHeight(g_font_hint)) / 2, hint_max);
     /* 右侧提示 */
     if (streaming) {
-        ts = TTF_RenderUTF8_Blended(g_font_hint, th ? "思考中…" : "回复中…", COL_ACCENT);
+        SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_hint, th ? "思考中…" : "回复中…", COL_ACCENT);
         if (ts) {
             SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
             SDL_Rect d = { WIN_W - SB_W - ts->w - 24, (FOOTER_H - ts->h) / 2, ts->w, ts->h };
@@ -1689,14 +1695,7 @@ static void render_key_menu(void) {
     }
 
     if (g_key_menu_msg[0]) {
-        ts = TTF_RenderUTF8_Blended(g_font_hint, g_key_menu_msg, COL_TEXT2);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 8, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font_hint, g_key_menu_msg, COL_TEXT2, 60, y + 8, WIN_W - 140);
     }
 
     const char *hint = "方向键/点击 选择    A 执行    B 返回设置    + 退出";
@@ -1814,16 +1813,9 @@ static void render_settings(void) {
             SDL_FreeSurface(ts);
         }
 
-        char value[200];
+        char value[512];
         set_value(i, value, sizeof(value));
-        ts = TTF_RenderUTF8_Blended(g_font_hint, value, COL_ACCENT);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 420, y, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font_hint, value, COL_ACCENT, 420, y, WIN_W - 420 - 40);
     }
 
     const char *hint = "方向键 选择    A 修改/切换    B 保存并返回    + 退出";
@@ -2190,26 +2182,12 @@ static void render_sessions(void) {
     int y = HEADER_H + 16;
 
     if (!g_sess_loaded && !g_sess_err[0]) {
-        ts = TTF_RenderUTF8_Blended(g_font, "正在加载会话列表…", COL_TEXT2);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, "正在加载会话列表…", COL_TEXT2, 60, y + 30, WIN_W - 120);
         return;
     }
 
     if (g_sess_err[0]) {
-        ts = TTF_RenderUTF8_Blended(g_font, g_sess_err, COL_RED);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, g_sess_err, COL_RED, 60, y + 30, WIN_W - 120);
         const char *hint = "B 返回重试(请确认桥接已启动、地址正确)";
         ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
         if (ts) {
@@ -2251,17 +2229,9 @@ static void render_sessions(void) {
                            (Sint16)(row.y + row.h), 10,
                            COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
 
-        /* 标题(截断) */
-        char title[128];
-        snprintf(title, sizeof(title), "%s", g_sessions[i].title);
-        ts = TTF_RenderUTF8_Blended(g_font, title, COL_TEXT);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + 10, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        /* 标题(像素级截断,右侧留状态栏空间) */
+        draw_trunc(g_font, g_sessions[i].title, COL_TEXT,
+                   row.x + 20, row.y + 10, WIN_W - 48 - 240);
 
         /* 右侧:状态 + 时间 */
         char meta[64];
@@ -2498,25 +2468,11 @@ static void render_workspaces(void) {
     int y = HEADER_H + 16;
 
     if (!g_ws_loaded && !g_ws_err[0]) {
-        ts = TTF_RenderUTF8_Blended(g_font, "正在加载工作区…", COL_TEXT2);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, "正在加载工作区…", COL_TEXT2, 60, y + 30, WIN_W - 120);
         return;
     }
     if (g_ws_err[0]) {
-        ts = TTF_RenderUTF8_Blended(g_font, g_ws_err, COL_RED);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, g_ws_err, COL_RED, 60, y + 30, WIN_W - 120);
         return;
     }
 
@@ -2550,26 +2506,14 @@ static void render_workspaces(void) {
 
         char label[200];
         snprintf(label, sizeof(label), "%s", g_wss[i].title);
-        ts = TTF_RenderUTF8_Blended(g_font, label, COL_TEXT);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + 10, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, label, COL_TEXT, row.x + 20, row.y + 10, WIN_W - 48 - 60);
 
         char meta[128];
         snprintf(meta, sizeof(meta), "%zu 会话 · %s", g_wss[i].session_count,
                  g_wss[i].path ? g_wss[i].path : "");
-        ts = TTF_RenderUTF8_Blended(g_font_hint, meta, COL_TEXT3);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + row_h - ts->h - 8, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font_hint, meta, COL_TEXT3,
+                   row.x + 20, row.y + row_h - TTF_FontHeight(g_font_hint) - 8,
+                   WIN_W - 48 - 60);
         y += row_h + 8;
         if (y > WIN_H - 140) break;
     }
@@ -2827,25 +2771,11 @@ static void render_ws_sessions(void) {
     int y = HEADER_H + 16;
 
     if (!g_wss_loaded && !g_wss_err[0]) {
-        ts = TTF_RenderUTF8_Blended(g_font, "正在加载会话…", COL_TEXT2);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, "正在加载会话…", COL_TEXT2, 60, y + 30, WIN_W - 120);
         return;
     }
     if (g_wss_err[0]) {
-        ts = TTF_RenderUTF8_Blended(g_font, g_wss_err, COL_RED);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, g_wss_err, COL_RED, 60, y + 30, WIN_W - 120);
         return;
     }
 
@@ -2874,14 +2804,8 @@ static void render_ws_sessions(void) {
                        sel ? COL_SURF2.r : COL_SURF.r,
                        sel ? COL_SURF2.g : COL_SURF.g,
                        sel ? COL_SURF2.b : COL_SURF.b, 255);
-        ts = TTF_RenderUTF8_Blended(g_font, g_wss_sessions[i].title, COL_TEXT);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + 10, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, g_wss_sessions[i].title, COL_TEXT,
+                   row.x + 20, row.y + 10, WIN_W - 48 - 240);
         char meta[64];
         if (g_wss_sessions[i].running) snprintf(meta, sizeof(meta), "运行中");
         else fmt_time(g_wss_sessions[i].updated_at, meta, sizeof(meta));
@@ -3024,38 +2948,18 @@ static void render_models(void) {
     char sub[200];
     snprintf(sub, sizeof(sub), "当前: %s · %s", g_cur_model,
              strcmp(g_cfg.backend, "deepseek") == 0 ? "DeepSeek(全局)" : "Harness(本会话)");
-    ts = TTF_RenderUTF8_Blended(g_font_hint, sub, COL_TEXT3);
-    if (ts) {
-        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-        SDL_Rect d = { 200, (HEADER_H - ts->h) / 2 + 2, ts->w, ts->h };
-        SDL_RenderCopy(g_ren, tt, NULL, &d);
-        SDL_DestroyTexture(tt);
-        SDL_FreeSurface(ts);
-    }
+    draw_trunc(g_font_hint, sub, COL_TEXT3, 200,
+               (HEADER_H - TTF_FontHeight(g_font_hint)) / 2 + 2, WIN_W - 200 - 40);
 
     const int row_h = 64;
     int y = HEADER_H + 16;
 
     if (!g_models_loaded && !g_models_err[0]) {
-        ts = TTF_RenderUTF8_Blended(g_font, "正在读取模型列表…", COL_TEXT2);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, "正在读取模型列表…", COL_TEXT2, 60, y + 30, WIN_W - 120);
         return;
     }
     if (g_models_err[0]) {
-        ts = TTF_RenderUTF8_Blended(g_font, g_models_err, COL_RED);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, g_models_err, COL_RED, 60, y + 30, WIN_W - 120);
         return;
     }
 
@@ -3075,29 +2979,17 @@ static void render_models(void) {
         char label[200];
         snprintf(label, sizeof(label), "%s%s", g_models[i].name,
                  strcmp(g_models[i].id, g_cur_model) == 0 ? " (当前)" : "");
-        ts = TTF_RenderUTF8_Blended(g_font, label,
-                                    strcmp(g_models[i].id, g_cur_model) == 0
-                                        ? COL_BRAND : COL_TEXT);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + 10, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, label,
+                   strcmp(g_models[i].id, g_cur_model) == 0 ? COL_BRAND : COL_TEXT,
+                   row.x + 20, row.y + 10, WIN_W - 48 - 60);
         char meta[160];
         if (g_models[i].provider && g_models[i].provider[0])
             snprintf(meta, sizeof(meta), "%s · %s", g_models[i].provider, g_models[i].id);
         else
             snprintf(meta, sizeof(meta), "%s", g_models[i].id);
-        ts = TTF_RenderUTF8_Blended(g_font_hint, meta, COL_TEXT3);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + row_h - ts->h - 8, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font_hint, meta, COL_TEXT3,
+                   row.x + 20, row.y + row_h - TTF_FontHeight(g_font_hint) - 8,
+                   WIN_W - 48 - 60);
         y += row_h + 8;
         if (y > WIN_H - 100) break;
     }
@@ -3250,49 +3142,22 @@ static void render_search(void) {
 
     char hdr_title[300];
     snprintf(hdr_title, sizeof(hdr_title), "搜索结果:%s", g_last_query);
-    SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, hdr_title, COL_TEXT);
-    if (ts) {
-        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-        SDL_Rect d = { 24, (HEADER_H - ts->h) / 2, ts->w, ts->h };
-        SDL_RenderCopy(g_ren, tt, NULL, &d);
-        SDL_DestroyTexture(tt);
-        SDL_FreeSurface(ts);
-    }
+    draw_trunc(g_font_title, hdr_title, COL_TEXT, 24,
+               (HEADER_H - TTF_FontHeight(g_font_title)) / 2, WIN_W - 48 - 60);
 
     const int row_h = 64;
     int y = HEADER_H + 16;
 
     if (!g_search_loaded && !g_search_err[0]) {
-        ts = TTF_RenderUTF8_Blended(g_font, "正在搜索…", COL_TEXT2);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, "正在搜索…", COL_TEXT2, 60, y + 30, WIN_W - 120);
         return;
     }
     if (g_search_err[0]) {
-        ts = TTF_RenderUTF8_Blended(g_font, g_search_err, COL_RED);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, g_search_err, COL_RED, 60, y + 30, WIN_W - 120);
         return;
     }
     if (g_search_n == 0) {
-        ts = TTF_RenderUTF8_Blended(g_font, "没有匹配的会话", COL_TEXT2);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { 60, y + 30, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, "没有匹配的会话", COL_TEXT2, 60, y + 30, WIN_W - 120);
         return;
     }
 
@@ -3304,34 +3169,17 @@ static void render_search(void) {
                        sel ? COL_SURF2.r : COL_SURF.r,
                        sel ? COL_SURF2.g : COL_SURF.g,
                        sel ? COL_SURF2.b : COL_SURF.b, 255);
-        char text[256];
+        char text[512];
         snprintf(text, sizeof(text), "%s", g_search[i].snippet);
-        size_t fit = utf8_fit_bytes(text, 220);
-        if (fit < strlen(text)) {
-            text[fit] = '\0';
-            strcat(text, "…");
-        }
-        ts = TTF_RenderUTF8_Blended(g_font, text, COL_TEXT);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+        draw_trunc(g_font, text, COL_TEXT,
+                   row.x + 20, row.y + (row_h - TTF_FontHeight(g_font)) / 2,
+                   WIN_W - 48 - 60);
         y += row_h + 8;
         if (y > WIN_H - 100) break;
     }
 
     const char *hint = "方向键 选择    A 打开    B 返回工作区    + 退出";
-    ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_TEXT3);
-    if (ts) {
-        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-        SDL_Rect d = { 24, WIN_H - 48, ts->w, ts->h };
-        SDL_RenderCopy(g_ren, tt, NULL, &d);
-        SDL_DestroyTexture(tt);
-        SDL_FreeSurface(ts);
-    }
+    draw_trunc(g_font_hint, hint, COL_TEXT3, 24, WIN_H - 48, WIN_W - 60);
 }
 
 /* ---------- 历史翻页 ---------- */
