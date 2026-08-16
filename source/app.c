@@ -2621,6 +2621,8 @@ static void ws_sessions_pick(int row_idx) {
         g_dirty = 1;
         return;
     }
+    snprintf(g_sess_title, sizeof(g_sess_title), "%s",
+             g_wss_sessions[row_idx - 1].title);
     clear_msgs();
     chat_message_t *msgs = NULL;
     size_t n = 0;
@@ -3100,6 +3102,7 @@ static void search_pick(int idx) {
         g_dirty = 1;
         return;
     }
+    snprintf(g_sess_title, sizeof(g_sess_title), "搜索结果");
     clear_msgs();
     chat_message_t *msgs = NULL;
     size_t n = 0;
