@@ -946,6 +946,10 @@ int harness_reorder_workspace(const backend_config_t *cfg, const char *workspace
 
 /* ---------- 模型(带推理强度) ---------- */
 
+const char *harness_current_session(void) {
+    return g_session;
+}
+
 int harness_select_model_ex(const backend_config_t *cfg,
                             const char *provider, const char *model,
                             const char *effort, char *err, size_t errsz) {

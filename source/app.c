@@ -12,6 +12,7 @@
 #include "app.h"
 #include "backend.h"
 #include "backend_harness.h"
+#include "cJSON.h"
 #include "config.h"
 #include "net.h"
 #include "textinput.h"
@@ -25,6 +26,10 @@
 #define MAX_LINE_LEN 4096
 #define MAX_LINES    128
 #define MAX_QUEUE    512
+#define SB_W         360  /* 侧栏宽 */
+#define SB_ROWS_MAX  512
+#define HIST_HARNESS  "sdmc:/switch/switch-dsh-client/history_harness.json"
+#define HIST_DEEPSEEK "sdmc:/switch/switch-dsh-client/history_deepseek.json"
 
 typedef struct {
     char *text;   /* 正文, malloc, UTF-8 */
@@ -113,6 +118,31 @@ static int g_scroll_offset = 0; /* 相对底部的上滚像素(0=贴底) */
 static long long g_first_seq = -1;
 static char g_cur_effort[16] = "";
 
+/* 双后端独立会话缓冲(切换/重启不丢) */
+static msg_t g_buf_h[MAX_MSGS];
+static msg_t g_buf_d[MAX_MSGS];
+static int g_bufn_h = 0, g_bufn_d = 0;
+static int g_bufscroll_h = 0, g_bufscroll_d = 0;
+static long long g_buffirst_h = -1, g_buffirst_d = -1;
+
+/* 侧栏(默认显示,对齐桌面版) */
+typedef struct {
+    int kind; /* 0 新建 1 会话 4 分组头 2 工作区管理 3 设置 */
+    int idx;  /* kind==1 时是 g_sessions 下标 */
+    int fy;
+    int fh;
+} sb_row_t;
+static sb_row_t g_sb_rows[SB_ROWS_MAX];
+static int g_sb_rows_n = 0;
+static int g_sb_focus_of[SB_ROWS_MAX]; /* 行 -> 焦点序号(-1 不可聚焦) */
+static int g_sb_row_of[SB_ROWS_MAX];   /* 焦点序号 -> 行 */
+static int g_sb_focus_n = 0;
+static int g_sb_loaded = 0;
+static int g_focus = 0; /* 0=对话 1=侧栏 */
+static int g_sb_idx = 0;
+static char g_sess_title[128] = "新会话";
+static screen_t g_prev_screen = SCREEN_CHOICE;
+
 /* 配色对齐 DeepSeek Harness Web 暗色主题(design-platform.css) */
 static const SDL_Color COL_BG    = {  21,  21,  23, 255 }; /* bg-base (bluish-950) */
 static const SDL_Color COL_SURF  = {  27,  27,  28, 255 }; /* sidebar/layer-1 (bluish-900) */
@@ -196,6 +226,115 @@ static void add_msg(int role, const char *text, int done) {
     m->tex_h = 0;
     m->dirty = 1;
     g_dirty = 1;
+}
+
+/* ---------- 双后端会话缓冲与本地持久化 ---------- */
+
+static void buf_clear(msg_t *dst, int *dn) {
+    for (int i = 0; i < *dn; i++) {
+        msg_tex_destroy(&dst[i]);
+        free(dst[i].text);
+        free(dst[i].think);
+        free(dst[i].tools);
+        free(dst[i].notice);
+    }
+    *dn = 0;
+}
+
+static void store_active(msg_t *dst, int *dn, int *ds, long long *df) {
+    buf_clear(dst, dn);
+    *dn = g_nmsgs;
+    for (int i = 0; i < g_nmsgs; i++) dst[i] = g_msgs[i]; /* 所有权转移 */
+    *ds = g_scroll_offset;
+    *df = g_first_seq;
+    g_nmsgs = 0;
+    memset(g_msgs, 0, sizeof(g_msgs));
+    g_dirty = 1;
+}
+
+static void restore_active(msg_t *src, int *sn, int ss, long long sf) {
+    for (int i = 0; i < g_nmsgs; i++) {
+        msg_tex_destroy(&g_msgs[i]);
+        free(g_msgs[i].text);
+        free(g_msgs[i].think);
+        free(g_msgs[i].tools);
+        free(g_msgs[i].notice);
+    }
+    g_nmsgs = *sn;
+    for (int i = 0; i < *sn; i++) g_msgs[i] = src[i];
+    *sn = 0;
+    memset(src, 0, sizeof(g_msgs));
+    g_scroll_offset = ss;
+    g_first_seq = sf;
+    g_dirty = 1;
+}
+
+static void history_save(const char *path, const msg_t *msgs, int n) {
+    cJSON *arr = cJSON_CreateArray();
+    if (!arr) return;
+    for (int i = 0; i < n; i++) {
+        if (!msgs[i].text || !msgs[i].text[0]) continue;
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "role", msgs[i].role);
+        cJSON_AddStringToObject(o, "text", msgs[i].text);
+        cJSON_AddItemToArray(arr, o);
+    }
+    char *j = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    if (!j) return;
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fwrite(j, 1, strlen(j), f);
+        fclose(f);
+    }
+    free(j);
+}
+
+static void history_load(const char *path, msg_t *dst, int *dn) {
+    buf_clear(dst, dn);
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz <= 0 || sz > 4 * 1024 * 1024) {
+        fclose(f);
+        return;
+    }
+    fseek(f, 0, SEEK_SET);
+    char *raw = (char *)malloc((size_t)sz + 1);
+    if (!raw) {
+        fclose(f);
+        return;
+    }
+    size_t rd = fread(raw, 1, (size_t)sz, f);
+    fclose(f);
+    raw[rd] = '\0';
+    cJSON *root = cJSON_Parse(raw);
+    free(raw);
+    if (!root) return;
+    if (cJSON_IsArray(root)) {
+        size_t n = cJSON_GetArraySize(root);
+        for (size_t i = 0; i < n && *dn < MAX_MSGS; i++) {
+            const cJSON *o = cJSON_GetArrayItem(root, i);
+            const cJSON *r = cJSON_GetObjectItemCaseSensitive(o, "role");
+            const cJSON *t = cJSON_GetObjectItemCaseSensitive(o, "text");
+            if (cJSON_IsString(t) && t->valuestring[0]) {
+                msg_t *m = &dst[(*dn)++];
+                memset(m, 0, sizeof(*m));
+                m->text = strdup(t->valuestring);
+                if (m->text) utf8_sanitize(m->text);
+                m->role = cJSON_IsNumber(r) && r->valueint == 1 ? ROLE_ASSISTANT : ROLE_USER;
+                m->done = 1;
+                m->dirty = 1;
+            }
+        }
+    }
+    cJSON_Delete(root);
+}
+
+static void save_current_history(void) {
+    const char *p = strcmp(g_cfg.backend, "deepseek") == 0 ? HIST_DEEPSEEK : HIST_HARNESS;
+    history_save(p, g_msgs, g_nmsgs);
 }
 
 /* ---------- 事件队列 ---------- */
@@ -378,6 +517,7 @@ static void drain_queue(void) {
             }
             g_stream_think = 0;
             g_dirty = 1;
+            save_current_history();
         } else if (ev.kind == 3) {
             if (g_nmsgs > 0) {
                 msg_t *m = &g_msgs[g_nmsgs - 1];
@@ -395,6 +535,7 @@ static void drain_queue(void) {
                 m->dirty = 1;
             }
             g_dirty = 1;
+            save_current_history();
         }
         free(ev.text);
     }
@@ -658,6 +799,299 @@ static int render_msg_flow(int x0, int maxw, int lineh, int y, msg_t *m,
     return cy - y;
 }
 
+/* ---------- 侧栏(默认显示,对齐桌面版) ---------- */
+
+/* 本节用到的后置函数声明 */
+static void clear_msgs(void);
+static void enter_workspaces(int from_startup);
+static void draw_line(TTF_Font *font, SDL_Color col, int x, int y,
+                      const char *text, size_t off, size_t len);
+static void chat_resume_last(void);
+
+static SDL_Texture *g_sb_tex = NULL;
+static int g_sb_rev = -1;
+static int g_drag_in_sb = 0;
+static int g_chat_resumed = 0;
+
+static void draw_trunc(TTF_Font *font, const char *text, SDL_Color col,
+                       int x, int y, int maxw) {
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", text);
+    for (;;) {
+        int w = 0, h = 0;
+        TTF_SizeUTF8(font, buf, &w, &h);
+        if (w <= maxw) break;
+        size_t len = strlen(buf);
+        if (len <= 1) break;
+        size_t cut = utf8_fit_bytes(buf, len - 2);
+        if (cut == 0 || cut >= len) break;
+        buf[cut] = '\0';
+        strcat(buf, "…");
+    }
+    draw_line(font, col, x, y, buf, 0, strlen(buf));
+}
+
+static void sb_build_rows(void) {
+    g_sb_rows_n = 0;
+    g_sb_rows[g_sb_rows_n].kind = 0;
+    g_sb_rows[g_sb_rows_n].idx = 0;
+    g_sb_rows_n++;
+
+    if (strcmp(g_cfg.backend, "harness") == 0 && g_sb_rows_n < SB_ROWS_MAX) {
+        char *matched = (char *)calloc(g_sessions_n ? g_sessions_n : 1, 1);
+        for (size_t w = 0; w < g_wss_n && g_sb_rows_n < SB_ROWS_MAX - 4; w++) {
+            g_sb_rows[g_sb_rows_n].kind = 4;
+            g_sb_rows[g_sb_rows_n].idx = (int)w;
+            g_sb_rows_n++;
+            for (size_t i = 0; i < g_sessions_n && g_sb_rows_n < SB_ROWS_MAX - 4; i++) {
+                if (g_sessions[i].cwd && g_wss[w].path &&
+                    strcmp(g_sessions[i].cwd, g_wss[w].path) == 0) {
+                    g_sb_rows[g_sb_rows_n].kind = 1;
+                    g_sb_rows[g_sb_rows_n].idx = (int)i;
+                    g_sb_rows_n++;
+                    matched[i] = 1;
+                }
+            }
+        }
+        /* 其他(未归入工作区的会话) */
+        int has_other = 0;
+        for (size_t i = 0; i < g_sessions_n; i++) if (!matched[i]) { has_other = 1; break; }
+        if (has_other && g_sb_rows_n < SB_ROWS_MAX - 4) {
+            g_sb_rows[g_sb_rows_n].kind = 4;
+            g_sb_rows[g_sb_rows_n].idx = -1;
+            g_sb_rows_n++;
+            for (size_t i = 0; i < g_sessions_n && g_sb_rows_n < SB_ROWS_MAX - 4; i++) {
+                if (!matched[i]) {
+                    g_sb_rows[g_sb_rows_n].kind = 1;
+                    g_sb_rows[g_sb_rows_n].idx = (int)i;
+                    g_sb_rows_n++;
+                }
+            }
+        }
+        free(matched);
+    }
+    g_sb_rows[g_sb_rows_n].kind = 2;
+    g_sb_rows[g_sb_rows_n].idx = 0;
+    g_sb_rows_n++;
+    g_sb_rows[g_sb_rows_n].kind = 3;
+    g_sb_rows[g_sb_rows_n].idx = 0;
+    g_sb_rows_n++;
+}
+
+static void sb_load(void) {
+    char err[256] = {0};
+    if (strcmp(g_cfg.backend, "harness") == 0) {
+        harness_workspaces_free(g_wss, g_wss_n);
+        g_wss = NULL;
+        g_wss_n = 0;
+        harness_sessions_free(g_sessions, g_sessions_n);
+        g_sessions = NULL;
+        g_sessions_n = 0;
+        harness_list_workspaces(&g_cfg, &g_wss, &g_wss_n, err, sizeof(err));
+        harness_list_sessions(&g_cfg, &g_sessions, &g_sessions_n, err, sizeof(err));
+    }
+    sb_build_rows();
+    g_sb_idx = 0;
+    g_sb_loaded = 1;
+    g_dirty = 1;
+}
+
+static void ensure_sidebar_tex(void) {
+    const char *cur = harness_current_session();
+    if (!cur) cur = "";
+    int rev = (strcmp(g_cfg.backend, "deepseek") == 0 ? 1 : 0) + g_focus * 2 +
+              g_sb_idx * 8 + (g_sb_loaded ? 16 : 0) + (g_drag_in_sb ? 32 : 0);
+    for (const char *p = cur; *p; p++) rev = rev * 31 + (unsigned char)*p;
+    for (int i = 0; i < g_sb_rows_n; i++) {
+        if (g_sb_rows[i].kind == 1 && (size_t)g_sb_rows[i].idx < g_sessions_n)
+            for (const char *p = g_sessions[g_sb_rows[i].idx].title; *p; p++)
+                rev = rev * 31 + (unsigned char)*p;
+        else if (g_sb_rows[i].kind == 4 && g_sb_rows[i].idx >= 0 &&
+                 (size_t)g_sb_rows[i].idx < g_wss_n)
+            for (const char *p = g_wss[g_sb_rows[i].idx].title; *p; p++)
+                rev = rev * 31 + (unsigned char)*p;
+    }
+    if (rev == g_sb_rev && g_sb_tex) return;
+    if (g_sb_tex) SDL_DestroyTexture(g_sb_tex);
+    g_sb_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA8888,
+                                 SDL_TEXTUREACCESS_TARGET, SB_W, WIN_H);
+    if (!g_sb_tex) return;
+    SDL_SetRenderTarget(g_ren, g_sb_tex);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+    SDL_RenderClear(g_ren);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+    SDL_Rect hair = { SB_W - 1, 0, 1, WIN_H };
+    SDL_RenderFillRect(g_ren, &hair);
+
+    /* LOGO + 名称 */
+    if (g_logo_tex) {
+        SDL_Rect ld = { 10, 8, 36, 36 };
+        SDL_RenderCopy(g_ren, g_logo_tex, NULL, &ld);
+    }
+    draw_line(g_font_hint, COL_TEXT, 56, 18, "DSH Switch", 0, 10);
+
+    /* 后端标签 */
+    {
+        char tag[64];
+        snprintf(tag, sizeof(tag), "%s",
+                 strcmp(g_cfg.backend, "deepseek") == 0 ? "DeepSeek(官方 API)"
+                                                        : "Harness(局域网)");
+        draw_line(g_font_hint, COL_ACCENT, 16, 58, tag, 0, strlen(tag));
+    }
+
+    /* 行 */
+    int y = 92;
+    int fi = 0;
+    for (int i = 0; i < g_sb_rows_n; i++) {
+        sb_row_t *r = &g_sb_rows[i];
+        if (r->kind == 4) {
+            if (y + 30 > WIN_H - 100) break;
+            r->fy = y;
+            r->fh = 30;
+            g_sb_focus_of[i] = -1;
+            const char *t = "其他";
+            if (r->idx >= 0 && (size_t)r->idx < g_wss_n) t = g_wss[r->idx].title;
+            draw_trunc(g_font_hint, t, COL_TEXT3, 20, y + 4, SB_W - 40);
+            y += 30;
+            continue;
+        }
+        if (y + 48 > WIN_H - 100) break;
+        r->fy = y;
+        r->fh = 48;
+        g_sb_focus_of[i] = fi;
+        g_sb_row_of[fi] = i;
+        fi++;
+
+        int sel = (g_focus && g_sb_idx == fi - 1);
+        if (sel) {
+            roundedBoxRGBA(g_ren, 8, (Sint16)y, SB_W - 12, (Sint16)(y + 44), 8,
+                           COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+            SDL_SetRenderDrawColor(g_ren, COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
+            SDL_Rect bar = { 8, y + 8, 3, 28 };
+            SDL_RenderFillRect(g_ren, &bar);
+        }
+
+        if (r->kind == 0) {
+            const char *lab = strcmp(g_cfg.backend, "deepseek") == 0
+                                  ? "＋ 新对话" : "＋ 新建会话";
+            draw_line(g_font_hint, COL_BRAND, 20, y + 12, lab, 0, strlen(lab));
+        } else if (r->kind == 1) {
+            harness_session_t *s = &g_sessions[r->idx];
+            const char *curs = harness_current_session();
+            SDL_Color tc = (curs && strcmp(curs, s->session_id) == 0) ? COL_BRAND : COL_TEXT;
+            draw_trunc(g_font_hint, s->title, tc, 20, y + 6, SB_W - 60);
+            if (s->running) draw_line(g_font_hint, COL_GREEN, 20, y + 28, "运行中", 0, 9);
+        } else if (r->kind == 2) {
+            draw_line(g_font_hint, COL_TEXT, 20, y + 12, "工作区管理", 0, 12);
+        } else if (r->kind == 3) {
+            draw_line(g_font_hint, COL_TEXT, 20, y + 12, "设置", 0, 6);
+        }
+        y += 48;
+    }
+    g_sb_focus_n = fi;
+
+    draw_line(g_font_hint, COL_TEXT3, 16, WIN_H - 26, "X 焦点切换  Y 设置  R 切后端",
+              0, strlen("X 焦点切换  Y 设置  R 切后端"));
+    SDL_SetRenderTarget(g_ren, NULL);
+    g_sb_rev = rev;
+}
+
+static void sb_nav(int dir) {
+    if (g_sb_focus_n == 0) return;
+    g_sb_idx += dir;
+    if (g_sb_idx < 0) g_sb_idx = 0;
+    if (g_sb_idx >= g_sb_focus_n) g_sb_idx = g_sb_focus_n - 1;
+    g_dirty = 1;
+}
+
+static void sb_activate(int fi) {
+    if (fi < 0 || fi >= g_sb_focus_n) return;
+    int row = g_sb_row_of[fi];
+    sb_row_t *r = &g_sb_rows[row];
+    if (r->kind == 0) {
+        if (strcmp(g_cfg.backend, "harness") == 0) {
+            char err[256] = {0};
+            if (harness_new_session_in(&g_cfg, NULL, err, sizeof(err)) == 0) {
+                clear_msgs();
+                add_msg(ROLE_ASSISTANT, "已新建会话。\nA 输入消息开始。", 1);
+                snprintf(g_sess_title, sizeof(g_sess_title), "新会话");
+                save_current_history();
+            }
+        } else {
+            clear_msgs();
+            add_msg(ROLE_ASSISTANT, "新对话已开始。", 1);
+            snprintf(g_sess_title, sizeof(g_sess_title), "DeepSeek 对话");
+            save_current_history();
+        }
+        g_focus = 0;
+        g_dirty = 1;
+        return;
+    }
+    if (r->kind == 1) {
+        if ((size_t)r->idx >= g_sessions_n) return;
+        harness_session_t *s = &g_sessions[r->idx];
+        char err[256] = {0};
+        if (harness_use_session(&g_cfg, s->session_id, err, sizeof(err)) != 0) return;
+        clear_msgs();
+        chat_message_t *msgs = NULL;
+        size_t n = 0;
+        long long first = -1;
+        if (harness_fetch_history_ex(&g_cfg, 0, &msgs, &n, &first,
+                                     err, sizeof(err)) == 0) {
+            for (size_t i = 0; i < n; i++)
+                add_msg(msgs[i].role, msgs[i].content ? msgs[i].content : "", 1);
+            for (size_t i = 0; i < n; i++) free(msgs[i].content);
+            free(msgs);
+            g_first_seq = first;
+        }
+        if (g_nmsgs == 0) add_msg(ROLE_ASSISTANT, "(该会话暂无聊天记录)", 1);
+        snprintf(g_sess_title, sizeof(g_sess_title), "%s", s->title);
+        g_focus = 0;
+        g_dirty = 1;
+        return;
+    }
+    if (r->kind == 2) {
+        enter_workspaces(0);
+        return;
+    }
+    if (r->kind == 3) {
+        g_set_idx = 0;
+        g_screen = SCREEN_SETTINGS;
+        g_dirty = 1;
+    }
+}
+
+static void sb_tap(int ty) {
+    for (int i = 0; i < g_sb_rows_n; i++) {
+        sb_row_t *r = &g_sb_rows[i];
+        if (ty >= r->fy && ty < r->fy + r->fh && g_sb_focus_of[i] >= 0) {
+            g_sb_idx = g_sb_focus_of[i];
+            sb_activate(g_sb_idx);
+            return;
+        }
+    }
+}
+
+static void chat_resume_last(void) {
+    if (strcmp(g_cfg.backend, "harness") != 0) return;
+    const char *sid = harness_current_session();
+    if (!sid || !sid[0]) return;
+    char err[256] = {0};
+    chat_message_t *msgs = NULL;
+    size_t n = 0;
+    long long first = -1;
+    if (harness_fetch_history_ex(&g_cfg, 0, &msgs, &n, &first,
+                                 err, sizeof(err)) == 0 && n > 0) {
+        clear_msgs();
+        for (size_t i = 0; i < n; i++)
+            add_msg(msgs[i].role, msgs[i].content ? msgs[i].content : "", 1);
+        for (size_t i = 0; i < n; i++) free(msgs[i].content);
+        free(msgs);
+        g_first_seq = first;
+        g_dirty = 1;
+    }
+}
+
 /* ---------- 渲染缓存(60fps:消息预渲染成纹理,帧内只贴图) ---------- */
 
 static SDL_Texture *g_hdr_tex = NULL;
@@ -709,27 +1143,25 @@ static void ensure_header_tex(void) {
     int rev = strcmp(g_cfg.backend, "deepseek") == 0 ? 1 : 0;
     const char *mp = g_cur_model[0] ? g_cur_model : (g_cfg.model ? g_cfg.model : "");
     for (const char *p = mp; *p; p++) rev = rev * 31 + (unsigned char)*p;
+    for (const char *p = g_sess_title; *p; p++) rev = rev * 31 + (unsigned char)*p;
     if (rev == g_hdr_rev && g_hdr_tex) return;
     if (g_hdr_tex) SDL_DestroyTexture(g_hdr_tex);
     g_hdr_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA8888,
-                                  SDL_TEXTUREACCESS_TARGET, WIN_W, HEADER_H);
+                                  SDL_TEXTUREACCESS_TARGET, WIN_W - SB_W, HEADER_H);
     if (!g_hdr_tex) return;
     SDL_SetRenderTarget(g_ren, g_hdr_tex);
     SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
     SDL_RenderClear(g_ren);
     SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
-    SDL_Rect hair = { 0, HEADER_H - 1, WIN_W, 1 };
+    SDL_Rect hair = { 0, HEADER_H - 1, WIN_W - SB_W, 1 };
     SDL_RenderFillRect(g_ren, &hair);
-    if (g_logo_tex) {
-        SDL_Rect ld = { 12, (HEADER_H - 42) / 2, 42, 42 };
-        SDL_RenderCopy(g_ren, g_logo_tex, NULL, &ld);
-    }
-    char title[128];
-    snprintf(title, sizeof(title), "DSH Switch 客户端");
+
+    char title[160];
+    snprintf(title, sizeof(title), "%s", g_sess_title);
     SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, title, COL_TEXT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-        SDL_Rect d = { 66, (HEADER_H - ts->h) / 2, ts->w, ts->h };
+        SDL_Rect d = { 20, (HEADER_H - ts->h) / 2, ts->w, ts->h };
         SDL_RenderCopy(g_ren, tt, NULL, &d);
         SDL_DestroyTexture(tt);
         SDL_FreeSurface(ts);
@@ -739,7 +1171,7 @@ static void ensure_header_tex(void) {
     ts = TTF_RenderUTF8_Blended(g_font_hint, title, COL_ACCENT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-        SDL_Rect d = { WIN_W - ts->w - 24, (HEADER_H - ts->h) / 2, ts->w, ts->h };
+        SDL_Rect d = { WIN_W - SB_W - ts->w - 24, (HEADER_H - ts->h) / 2, ts->w, ts->h };
         SDL_RenderCopy(g_ren, tt, NULL, &d);
         SDL_DestroyTexture(tt);
         SDL_FreeSurface(ts);
@@ -758,7 +1190,7 @@ static void ensure_footer_tex(void) {
     if (rev == g_ftr_rev && g_ftr_tex) return;
     if (g_ftr_tex) SDL_DestroyTexture(g_ftr_tex);
     g_ftr_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA8888,
-                                  SDL_TEXTUREACCESS_TARGET, WIN_W, FOOTER_H);
+                                  SDL_TEXTUREACCESS_TARGET, WIN_W - SB_W, FOOTER_H);
     if (!g_ftr_tex) return;
     SDL_SetRenderTarget(g_ren, g_ftr_tex);
     SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
@@ -781,11 +1213,12 @@ static void ensure_footer_tex(void) {
         SDL_DestroyTexture(tt);
         SDL_FreeSurface(ts);
     }
+    /* 右侧提示 */
     if (streaming) {
         ts = TTF_RenderUTF8_Blended(g_font_hint, th ? "思考中…" : "回复中…", COL_ACCENT);
         if (ts) {
             SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { WIN_W - ts->w - 24, (FOOTER_H - ts->h) / 2, ts->w, ts->h };
+            SDL_Rect d = { WIN_W - SB_W - ts->w - 24, (FOOTER_H - ts->h) / 2, ts->w, ts->h };
             SDL_RenderCopy(g_ren, tt, NULL, &d);
             SDL_DestroyTexture(tt);
             SDL_FreeSurface(ts);
@@ -801,16 +1234,23 @@ static void render_chat(void) {
     SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
     SDL_RenderClear(g_ren);
 
-    /* 顶栏(缓存纹理) */
-    ensure_header_tex();
-    if (g_hdr_tex) SDL_RenderCopy(g_ren, g_hdr_tex, NULL, NULL);
+    /* 左侧栏(默认显示,桌面版布局) */
+    ensure_sidebar_tex();
+    if (g_sb_tex) SDL_RenderCopy(g_ren, g_sb_tex, NULL, NULL);
 
-    /* 消息区 */
+    /* 顶栏(缓存纹理,会话标题) */
+    ensure_header_tex();
+    if (g_hdr_tex) {
+        SDL_Rect hd = { SB_W, 0, WIN_W - SB_W, HEADER_H };
+        SDL_RenderCopy(g_ren, g_hdr_tex, NULL, &hd);
+    }
+
+    /* 消息区(对话面板) */
     const int area_y0 = HEADER_H + 10;
     const int area_y1 = WIN_H - FOOTER_H - 8;
     const int lineh = TTF_FontHeight(g_font) + 6;
-    const int content_x = 200;
-    const int cmaxw = WIN_W - content_x * 2 - 24;
+    const int content_x = SB_W + 90;
+    const int cmaxw = WIN_W - content_x - 90;
 
     /* 任务清单条(顶部浮层,短文本直接画) */
     if (g_todos_str[0]) {
@@ -871,7 +1311,7 @@ static void render_chat(void) {
     /* 底栏(缓存纹理) */
     ensure_footer_tex();
     if (g_ftr_tex) {
-        SDL_Rect fd = { 0, WIN_H - FOOTER_H, WIN_W, FOOTER_H };
+        SDL_Rect fd = { SB_W, WIN_H - FOOTER_H, WIN_W - SB_W, FOOTER_H };
         SDL_RenderCopy(g_ren, g_ftr_tex, NULL, &fd);
     }
 }
@@ -903,13 +1343,14 @@ static void poll_events(void) {
             ev.button.button == SDL_BUTTON_LEFT) {
             g_drag = 1;
             g_drag_moved = 0;
+            g_drag_in_sb = (ev.button.x < SB_W);
             g_drag_start_y = ev.button.y;
             g_drag_last_y = ev.button.y;
             g_drag_start_offset = g_scroll_offset;
         } else if (ev.type == SDL_MOUSEMOTION && g_drag) {
             int dy = g_drag_last_y - ev.motion.y; /* 上滑 = 看更早 */
             if (dy > 8 || dy < -8) g_drag_moved = 1;
-            if (g_drag_moved && g_screen == SCREEN_CHAT) {
+            if (g_drag_moved && !g_drag_in_sb && g_screen == SCREEN_CHAT) {
                 g_scroll_offset = g_drag_start_offset + (g_drag_start_y - ev.motion.y);
                 g_dirty = 1;
             }
@@ -957,6 +1398,7 @@ static void poll_events(void) {
         if (cnt > 0 && g_touch_prev == 0) {
             g_drag = 1;
             g_drag_moved = 0;
+            g_drag_in_sb = ((int)ts.touches[0].x < SB_W);
             g_drag_start_y = (int)ts.touches[0].y;
             g_drag_start_x = (int)ts.touches[0].x;
             g_drag_last_y = g_drag_start_y;
@@ -966,7 +1408,7 @@ static void poll_events(void) {
             int cy2 = (int)ts.touches[0].y;
             int dy = g_drag_last_y - cy2;
             if (dy > 8 || dy < -8) g_drag_moved = 1;
-            if (g_drag_moved && g_screen == SCREEN_CHAT) {
+            if (g_drag_moved && !g_drag_in_sb && g_screen == SCREEN_CHAT) {
                 g_scroll_offset = g_drag_start_offset + (g_drag_start_y - cy2);
                 g_dirty = 1;
             }
@@ -1353,8 +1795,20 @@ static void choice_input(u64 kDown) {
         g_cfg.backend = strdup(be);
         config_save(&g_cfg);
         printf("choice: backend=%s\n", g_cfg.backend);
-        if (g_choice_idx == 0) enter_workspaces(1); /* Harness:先看工作区 */
-        else g_screen = SCREEN_CHAT;
+        if (g_choice_idx == 0) {
+            /* Harness:恢复本地缓冲,进聊天后自动拉服务端历史 */
+            restore_active(g_buf_h, &g_bufn_h, g_bufscroll_h, g_buffirst_h);
+            snprintf(g_sess_title, sizeof(g_sess_title), "上次会话");
+            g_chat_resumed = 0;
+        } else {
+            restore_active(g_buf_d, &g_bufn_d, g_bufscroll_d, g_buffirst_d);
+            snprintf(g_sess_title, sizeof(g_sess_title), "DeepSeek 对话");
+            g_chat_resumed = 1;
+        }
+        g_focus = 0;
+        g_sb_idx = 0;
+        g_sb_loaded = 0;
+        g_screen = SCREEN_CHAT;
         g_dirty = 1;
     }
 }
@@ -1541,7 +1995,11 @@ static void sessions_pick(void) {
     } else {
         add_msg(ROLE_ASSISTANT,
                 "已新建会话。\nA 输入消息;X 切换会话;Y 设置;+ 退出。", 1);
+        snprintf(g_sess_title, sizeof(g_sess_title), "新会话");
     }
+    if (sid && g_sess_idx > 0 && (size_t)g_sess_idx <= g_sessions_n)
+        snprintf(g_sess_title, sizeof(g_sess_title), "%s",
+                 g_sessions[g_sess_idx - 1].title);
     g_screen = SCREEN_CHAT;
     g_dirty = 1;
 }
@@ -2895,10 +3353,14 @@ int app_init(void) {
     g_q_mtx = SDL_CreateMutex();
     if (!g_q_mtx) return -1;
 
+    /* 恢复两套后端的本地聊天记录 */
+    history_load(HIST_HARNESS, g_buf_h, &g_bufn_h);
+    history_load(HIST_DEEPSEEK, g_buf_d, &g_bufn_d);
+
     add_msg(ROLE_ASSISTANT,
             "欢迎使用 DSH Switch 客户端。\n"
-            "A 输入消息;X 会话列表/清屏;Y 设置;+ 退出。\n"
-            "配置也会保存在 sdmc:/switch/switch-dsh-client/config.json", 1);
+            "A 输入消息;X 切换侧栏焦点;Y 设置;L 模型;R 切后端;+ 退出。\n"
+            "历史保存在 sdmc:/switch/switch-dsh-client/", 1);
     return 0;
 }
 
@@ -2930,12 +3392,38 @@ int app_frame(void) {
         if (!g_search_loaded && !g_search_err[0]) search_load();
         search_input(kDown);
     } else {
-        /* 触摸:点底栏 = 输入消息 */
+        /* 侧栏数据懒加载 + 自动恢复上次会话 */
+        if (g_prev_screen != SCREEN_CHAT) g_sb_loaded = 0;
+        if (!g_sb_loaded) sb_load();
+        if (!g_chat_resumed && strcmp(g_cfg.backend, "harness") == 0 &&
+            !g_worker_busy) {
+            g_chat_resumed = 1;
+            chat_resume_last();
+        }
+
+        /* 触摸:侧栏点选;对话区点底栏 = 输入消息 */
         if (g_tap_x >= 0) {
-            if (g_tap_y >= WIN_H - FOOTER_H) kDown |= HidNpadButton_A;
+            if (g_tap_x < SB_W) {
+                sb_tap(g_tap_y);
+            } else if (g_tap_y >= WIN_H - FOOTER_H) {
+                kDown |= HidNpadButton_A;
+            }
             g_tap_x = -1;
             g_tap_y = -1;
         }
+
+        /* 侧栏焦点导航 */
+        if (g_focus) {
+            if (kDown & HidNpadButton_Up) sb_nav(-1);
+            if (kDown & HidNpadButton_Down) sb_nav(1);
+            if (kDown & HidNpadButton_A) sb_activate(g_sb_idx);
+            if (kDown & HidNpadButton_B) {
+                g_focus = 0;
+                g_dirty = 1;
+            }
+            return 0; /* 焦点帧跳过对话逻辑与渲染 */
+        }
+
         if ((kDown & HidNpadButton_A) && !g_worker_busy) {
             if (textinput_prompt("输入消息", NULL, 1, 0, g_input, sizeof(g_input)) == 1) {
                 add_msg(ROLE_USER, g_input, 1);
@@ -2944,15 +3432,20 @@ int app_frame(void) {
             }
         }
         if ((kDown & HidNpadButton_X) && !g_worker_busy) {
-            if (strcmp(g_cfg.backend, "harness") == 0) enter_workspaces(0);
-            else clear_msgs();
+            g_focus = 1;
             g_dirty = 1;
         }
         if ((kDown & HidNpadButton_L) && !g_worker_busy) {
             enter_models();
         }
-        /* R:一键切换后端(DSH <-> DeepSeek) */
+        /* R:一键切换后端(独立会话 + 本地持久化) */
         if ((kDown & HidNpadButton_R) && !g_worker_busy) {
+            save_current_history();
+            if (strcmp(g_cfg.backend, "deepseek") == 0)
+                store_active(g_buf_d, &g_bufn_d, &g_bufscroll_d, &g_buffirst_d);
+            else
+                store_active(g_buf_h, &g_bufn_h, &g_bufscroll_h, &g_buffirst_h);
+
             const char *nb = strcmp(g_cfg.backend, "deepseek") == 0
                                  ? "harness" : "deepseek";
             free(g_cfg.backend);
@@ -2961,11 +3454,20 @@ int app_frame(void) {
             snprintf(g_cur_model, sizeof(g_cur_model), "%s",
                      g_cfg.model ? g_cfg.model : "");
             printf("toggle backend -> %s\n", g_cfg.backend);
-            add_msg(ROLE_ASSISTANT,
-                    strcmp(nb, "deepseek") == 0
-                        ? "已切换后端:DeepSeek(官方 API)。\nX 清屏;L 选模型。"
-                        : "已切换后端:Harness(局域网)。\nX 工作区;L 选模型。",
-                    1);
+
+            if (strcmp(nb, "harness") == 0) {
+                restore_active(g_buf_h, &g_bufn_h, g_bufscroll_h, g_buffirst_h);
+                snprintf(g_sess_title, sizeof(g_sess_title), "上次会话");
+                g_chat_resumed = 0;
+            } else {
+                restore_active(g_buf_d, &g_bufn_d, g_bufscroll_d, g_buffirst_d);
+                snprintf(g_sess_title, sizeof(g_sess_title), "DeepSeek 对话");
+                g_chat_resumed = 1;
+            }
+            g_focus = 0;
+            g_sb_idx = 0;
+            g_sb_loaded = 0;
+            g_dirty = 1;
         }
         /* B:停止生成 */
         if ((kDown & HidNpadButton_B) && g_worker_busy) {
@@ -3017,6 +3519,7 @@ int app_frame(void) {
         g_dirty = 0;
     }
     SDL_RenderPresent(g_ren);
+    g_prev_screen = g_screen;
     return 0;
 }
 
@@ -3048,6 +3551,11 @@ void app_exit(void) {
     harness_search_free(g_search, g_search_n);
     g_search = NULL;
     g_search_n = 0;
+    if (g_sb_tex) SDL_DestroyTexture(g_sb_tex);
+    g_sb_tex = NULL;
+    save_current_history();
+    buf_clear(g_buf_h, &g_bufn_h);
+    buf_clear(g_buf_d, &g_bufn_d);
     app_event_t ev;
     while (pop_event(&ev)) free(ev.text);
     if (g_q_mtx) SDL_DestroyMutex(g_q_mtx);

@@ -109,6 +109,9 @@ int harness_list_models_ex(const backend_config_t *cfg,
 
 void harness_models_free(model_option_t *list, size_t n);
 
+/* 当前活动会话 id(未创建时 NULL) */
+const char *harness_current_session(void);
+
 /* 会话级选模型(session.selectModel) */
 int harness_select_model(const backend_config_t *cfg,
                          const char *provider, const char *model,
