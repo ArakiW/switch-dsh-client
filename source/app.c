@@ -103,9 +103,9 @@ static int g_q_head = 0, g_q_tail = 0, g_q_count = 0;
 static volatile int g_worker_busy = 0;
 static int g_stream_think = 0; /* 当前流式处于思考阶段 */
 
-/* 任务清单 / 历史翻页 / 推理强度 */
+/* 任务清单 / 滚动 / 历史翻页 / 推理强度 */
 static char g_todos_str[512];
-static int g_stick_top = 0;
+static int g_scroll_offset = 0; /* 相对底部的上滚像素(0=贴底) */
 static long long g_first_seq = -1;
 static char g_cur_effort[16] = "";
 
@@ -645,9 +645,10 @@ static void render_chat(void) {
         total_h += th + toolh + noth + tnl * lineh + pad_y * 2 + 12
                  + (tnl > 0 ? 10 : 0) + ((toolh > 0 || noth > 0) ? 10 : 0);
     }
-    int y = area_y0;
-    if (!g_stick_top && total_h > (area_y1 - area_y0))
-        y -= (total_h - (area_y1 - area_y0));
+    int view_h = area_y1 - area_y0;
+    int max_off = total_h > view_h ? total_h - view_h : 0;
+    clamp_scroll(max_off);
+    int y = area_y0 + g_scroll_offset - (total_h > view_h ? total_h - view_h : 0);
 
     for (int i = 0; i < g_nmsgs; i++) {
         msg_t *m = &g_msgs[i];
@@ -786,10 +787,20 @@ static void render_chat(void) {
     }
 }
 
-/* ---------- 输入:手柄 + 触摸屏 ---------- */
+/* ---------- 输入:手柄 + 触摸屏(含拖动滚动) ---------- */
 
 static int g_tap_x = -1;
 static int g_tap_y = -1;
+static int g_drag = 0;
+static int g_drag_moved = 0;
+static int g_drag_start_y = 0;
+static int g_drag_last_y = 0;
+static int g_drag_start_offset = 0;
+
+static void clamp_scroll(int max_off) {
+    if (g_scroll_offset < 0) g_scroll_offset = 0;
+    if (g_scroll_offset > max_off) g_scroll_offset = max_off;
+}
 
 static void poll_events(void) {
     g_tap_x = -1;
@@ -798,13 +809,49 @@ static void poll_events(void) {
     while (SDL_PollEvent(&ev)) {
         if (ev.type == SDL_MOUSEBUTTONDOWN &&
             ev.button.button == SDL_BUTTON_LEFT) {
-            g_tap_x = ev.button.x;
-            g_tap_y = ev.button.y;
+            g_drag = 1;
+            g_drag_moved = 0;
+            g_drag_start_y = ev.button.y;
+            g_drag_last_y = ev.button.y;
+            g_drag_start_offset = g_scroll_offset;
+        } else if (ev.type == SDL_MOUSEMOTION && g_drag) {
+            int dy = g_drag_last_y - ev.motion.y; /* 上滑 = 看更早 */
+            if (dy > 8 || dy < -8) g_drag_moved = 1;
+            if (g_drag_moved && g_screen == SCREEN_CHAT) {
+                g_scroll_offset = g_drag_start_offset + (g_drag_start_y - ev.motion.y);
+                g_dirty = 1;
+            }
+            g_drag_last_y = ev.motion.y;
+        } else if (ev.type == SDL_MOUSEBUTTONUP &&
+                   ev.button.button == SDL_BUTTON_LEFT) {
+            if (!g_drag_moved) {
+                g_tap_x = ev.button.x;
+                g_tap_y = ev.button.y;
+            }
+            g_drag = 0;
         }
 #ifdef SDL_FINGERDOWN
         else if (ev.type == SDL_FINGERDOWN) {
-            g_tap_x = (int)(ev.tfinger.x * (float)WIN_W);
-            g_tap_y = (int)(ev.tfinger.y * (float)WIN_H);
+            g_drag = 1;
+            g_drag_moved = 0;
+            g_drag_start_y = (int)(ev.tfinger.y * (float)WIN_H);
+            g_drag_last_y = g_drag_start_y;
+            g_drag_start_offset = g_scroll_offset;
+        } else if (ev.type == SDL_FINGERMOTION && g_drag) {
+            int cy = (int)(ev.tfinger.y * (float)WIN_H);
+            int dy = g_drag_last_y - cy;
+            if (dy > 8 || dy < -8) g_drag_moved = 1;
+            if (g_drag_moved && g_screen == SCREEN_CHAT) {
+                g_scroll_offset = g_drag_start_offset + (g_drag_start_y - cy);
+                g_dirty = 1;
+            }
+            g_drag_last_y = cy;
+        } else if (ev.type == SDL_FINGERUP) {
+            if (!g_drag_moved) {
+                g_tap_x = (int)(ev.tfinger.x * (float)WIN_W);
+                g_tap_y = (int)(ev.tfinger.y * (float)WIN_H);
+            }
+            g_drag = 0;
         }
 #endif
     }
@@ -1299,7 +1346,7 @@ static void clear_msgs(void) {
         g_msgs[g_nmsgs].notice = NULL;
     }
     g_todos_str[0] = '\0';
-    g_stick_top = 0;
+    g_scroll_offset = 0;
     g_first_seq = -1;
 }
 
@@ -2648,7 +2695,7 @@ static void chat_load_older(void) {
                                  err, sizeof(err)) == 0 && n > 0) {
         prepend_msgs(msgs, n);
         g_first_seq = first;
-        g_stick_top = 1;
+        g_scroll_offset = 1000000; /* 渲染时 clamp 到顶部 */
         free(msgs);
     }
     g_dirty = 1;
@@ -2801,8 +2848,22 @@ int app_frame(void) {
         /* ZL:加载更早历史 / ZR:回到最新 */
         if ((kDown & HidNpadButton_ZL) && !g_worker_busy) chat_load_older();
         if ((kDown & HidNpadButton_ZR) && !g_worker_busy) {
-            g_stick_top = 0;
+            g_scroll_offset = 0;
             g_dirty = 1;
+        }
+        /* 方向键 / 右摇杆滚动历史 */
+        {
+            u64 held = padGetButtons(&g_pad);
+            int step = 0;
+            if (held & HidNpadButton_Up) step += 14;
+            if (held & HidNpadButton_Down) step -= 14;
+            HidAnalogStickState stickl, stickr;
+            padGetStickPos(&g_pad, &stickl, &stickr);
+            if (stickr.y > 8000 || stickr.y < -8000) step += stickr.y / 1200;
+            if (step != 0) {
+                g_scroll_offset += step;
+                g_dirty = 1;
+            }
         }
         if ((kDown & HidNpadButton_Y) && !g_worker_busy) {
             g_set_idx = 0;
