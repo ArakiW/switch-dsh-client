@@ -33,6 +33,10 @@ typedef struct {
     char *notice; /* 处理提示(审批/提问,可 NULL) */
     int role;     /* ROLE_USER / ROLE_ASSISTANT */
     int done;     /* 助手消息是否已结束(流式标记) */
+    SDL_Texture *tex; /* 预渲染纹理缓存 */
+    int tex_w;
+    int tex_h;
+    int dirty;        /* 内容变化,需重渲染纹理 */
 } msg_t;
 
 /* 工作线程 -> 主线程 事件队列 */
@@ -154,9 +158,21 @@ static TTF_Font *open_font(int ptsize) {
 
 /* ---------- 消息列表 ---------- */
 
+#define MAX_TEX_CACHE 32
+static int g_tex_count = 0;
+
+static void msg_tex_destroy(msg_t *m) {
+    if (m->tex) {
+        SDL_DestroyTexture(m->tex);
+        m->tex = NULL;
+        g_tex_count--;
+    }
+}
+
 static void add_msg(int role, const char *text, int done) {
     if (!text) text = "";
     if (g_nmsgs >= MAX_MSGS) {
+        msg_tex_destroy(&g_msgs[0]);
         free(g_msgs[0].text);
         free(g_msgs[0].think);
         free(g_msgs[0].tools);
@@ -175,6 +191,10 @@ static void add_msg(int role, const char *text, int done) {
     m->notice = NULL;
     m->role = role;
     m->done = done;
+    m->tex = NULL;
+    m->tex_w = 0;
+    m->tex_h = 0;
+    m->dirty = 1;
     g_dirty = 1;
 }
 
@@ -299,6 +319,7 @@ static void drain_queue(void) {
                         memcpy(nt + old, ev.text ? ev.text : "", add + 1);
                         m->text = nt;
                     }
+                    m->dirty = 1;
                 }
             }
             g_stream_think = 0;
@@ -316,6 +337,7 @@ static void drain_queue(void) {
                         memcpy(nt + old, ev.text ? ev.text : "", add + 1);
                         m->think = nt;
                     }
+                    m->dirty = 1;
                 }
             }
             g_stream_think = 1;
@@ -340,6 +362,7 @@ static void drain_queue(void) {
                         memcpy(dst, buf, add + 1);
                         *field = nt;
                     }
+                    m->dirty = 1;
                 }
             }
             g_dirty = 1;
@@ -351,6 +374,7 @@ static void drain_queue(void) {
                 g_msgs[g_nmsgs - 1].done = 1;
                 if (g_msgs[g_nmsgs - 1].text[0] == '\0')
                     strcpy(g_msgs[g_nmsgs - 1].text, "(无回复内容)");
+                g_msgs[g_nmsgs - 1].dirty = 1;
             }
             g_stream_think = 0;
             g_dirty = 1;
@@ -368,6 +392,7 @@ static void drain_queue(void) {
                     m->text = nt;
                 }
                 m->done = 1;
+                m->dirty = 1;
             }
             g_dirty = 1;
         }
@@ -633,26 +658,73 @@ static int render_msg_flow(int x0, int maxw, int lineh, int y, msg_t *m,
     return cy - y;
 }
 
-/* ---------- 渲染 ---------- */
+/* ---------- 渲染缓存(60fps:消息预渲染成纹理,帧内只贴图) ---------- */
 
-static void render_chat(void) {
+static SDL_Texture *g_hdr_tex = NULL;
+static SDL_Texture *g_ftr_tex = NULL;
+static int g_hdr_rev = -1;
+static int g_ftr_rev = -1;
+
+static void evict_textures(void) {
+    while (g_tex_count > MAX_TEX_CACHE) {
+        int freed = 0;
+        for (int i = 0; i < g_nmsgs; i++) {
+            msg_t *m = &g_msgs[i];
+            if (m->tex && i != g_nmsgs - 1) {
+                msg_tex_destroy(m);
+                m->dirty = 1; /* 滚回来时重新渲染 */
+                freed = 1;
+                break;
+            }
+        }
+        if (!freed) break;
+    }
+}
+
+/* 把一条消息渲染进纹理(内容变化才调用);超长消息不缓存走直绘 */
+static void render_msg_texture(msg_t *m, int x0, int maxw, int lineh) {
+    msg_tex_destroy(m);
+    int mw = 0;
+    int h = render_msg_flow(x0, maxw, lineh, 0, m, 1, &mw);
+    if (h <= 0) h = 12;
+    m->tex_h = h;
+    m->tex_w = maxw;
+    m->dirty = 0;
+    if (h > 2800) return; /* 超长消息直接绘制 */
+
+    SDL_Texture *tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA8888,
+                                         SDL_TEXTUREACCESS_TARGET, maxw, h);
+    if (!tex) return;
+    g_tex_count++;
+    SDL_SetRenderTarget(g_ren, tex);
     SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
     SDL_RenderClear(g_ren);
+    int wout = 0;
+    render_msg_flow(0, maxw, lineh, 0, m, 0, &wout);
+    SDL_SetRenderTarget(g_ren, NULL);
+    m->tex = tex;
+}
 
-    /* 顶栏(sidebar-fill + 底部发丝线) */
+static void ensure_header_tex(void) {
+    int rev = strcmp(g_cfg.backend, "deepseek") == 0 ? 1 : 0;
+    const char *mp = g_cur_model[0] ? g_cur_model : (g_cfg.model ? g_cfg.model : "");
+    for (const char *p = mp; *p; p++) rev = rev * 31 + (unsigned char)*p;
+    if (rev == g_hdr_rev && g_hdr_tex) return;
+    if (g_hdr_tex) SDL_DestroyTexture(g_hdr_tex);
+    g_hdr_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA8888,
+                                  SDL_TEXTUREACCESS_TARGET, WIN_W, HEADER_H);
+    if (!g_hdr_tex) return;
+    SDL_SetRenderTarget(g_ren, g_hdr_tex);
     SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
-    SDL_Rect hdr = { 0, 0, WIN_W, HEADER_H };
-    SDL_RenderFillRect(g_ren, &hdr);
+    SDL_RenderClear(g_ren);
     SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
     SDL_Rect hair = { 0, HEADER_H - 1, WIN_W, 1 };
     SDL_RenderFillRect(g_ren, &hair);
-
-    char title[128];
-    /* LOGO */
     if (g_logo_tex) {
         SDL_Rect ld = { 12, (HEADER_H - 42) / 2, 42, 42 };
         SDL_RenderCopy(g_ren, g_logo_tex, NULL, &ld);
     }
+    char title[128];
     snprintf(title, sizeof(title), "DSH Switch 客户端");
     SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_title, title, COL_TEXT);
     if (ts) {
@@ -663,8 +735,7 @@ static void render_chat(void) {
         SDL_FreeSurface(ts);
     }
     snprintf(title, sizeof(title), "%s · %s",
-             strcmp(g_cfg.backend, "deepseek") == 0 ? "DeepSeek" : "Harness",
-             g_cur_model[0] ? g_cur_model : (g_cfg.model ? g_cfg.model : ""));
+             strcmp(g_cfg.backend, "deepseek") == 0 ? "DeepSeek" : "Harness", mp);
     ts = TTF_RenderUTF8_Blended(g_font_hint, title, COL_ACCENT);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
@@ -673,6 +744,66 @@ static void render_chat(void) {
         SDL_DestroyTexture(tt);
         SDL_FreeSurface(ts);
     }
+    SDL_SetRenderTarget(g_ren, NULL);
+    g_hdr_rev = rev;
+}
+
+static void ensure_footer_tex(void) {
+    int busy = g_worker_busy ? 1 : 0;
+    int th = g_stream_think ? 1 : 0;
+    int be = strcmp(g_cfg.backend, "harness") == 0 ? 1 : 0;
+    int streaming = (g_nmsgs > 0 && g_msgs[g_nmsgs - 1].role == ROLE_ASSISTANT &&
+                     !g_msgs[g_nmsgs - 1].done) ? 1 : 0;
+    int rev = busy * 1000 + th * 100 + be * 10 + streaming;
+    if (rev == g_ftr_rev && g_ftr_tex) return;
+    if (g_ftr_tex) SDL_DestroyTexture(g_ftr_tex);
+    g_ftr_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA8888,
+                                  SDL_TEXTUREACCESS_TARGET, WIN_W, FOOTER_H);
+    if (!g_ftr_tex) return;
+    SDL_SetRenderTarget(g_ren, g_ftr_tex);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+    SDL_RenderClear(g_ren);
+    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+    SDL_Rect fhair = { 0, 0, WIN_W, 1 };
+    SDL_RenderFillRect(g_ren, &fhair);
+
+    const char *hint = busy
+                           ? (th ? "思考中…(B 停止)    + 退出"
+                                 : "回复中…(B 停止)    + 退出")
+                           : (be
+                              ? "A输入 B停止 X工作区 Y设置 L模型 R后端 ZL更早 ZR最新 +退出"
+                              : "A输入 B停止 X清屏 Y设置 L模型 R后端 +退出");
+    SDL_Surface *ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
+    if (ts) {
+        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+        SDL_Rect d = { 24, (FOOTER_H - ts->h) / 2, ts->w, ts->h };
+        SDL_RenderCopy(g_ren, tt, NULL, &d);
+        SDL_DestroyTexture(tt);
+        SDL_FreeSurface(ts);
+    }
+    if (streaming) {
+        ts = TTF_RenderUTF8_Blended(g_font_hint, th ? "思考中…" : "回复中…", COL_ACCENT);
+        if (ts) {
+            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+            SDL_Rect d = { WIN_W - ts->w - 24, (FOOTER_H - ts->h) / 2, ts->w, ts->h };
+            SDL_RenderCopy(g_ren, tt, NULL, &d);
+            SDL_DestroyTexture(tt);
+            SDL_FreeSurface(ts);
+        }
+    }
+    SDL_SetRenderTarget(g_ren, NULL);
+    g_ftr_rev = rev;
+}
+
+/* ---------- 渲染 ---------- */
+
+static void render_chat(void) {
+    SDL_SetRenderDrawColor(g_ren, COL_BG.r, COL_BG.g, COL_BG.b, 255);
+    SDL_RenderClear(g_ren);
+
+    /* 顶栏(缓存纹理) */
+    ensure_header_tex();
+    if (g_hdr_tex) SDL_RenderCopy(g_ren, g_hdr_tex, NULL, NULL);
 
     /* 消息区 */
     const int area_y0 = HEADER_H + 10;
@@ -681,7 +812,7 @@ static void render_chat(void) {
     const int content_x = 200;
     const int cmaxw = WIN_W - content_x * 2 - 24;
 
-    /* 任务清单条(顶部浮层) */
+    /* 任务清单条(顶部浮层,短文本直接画) */
     if (g_todos_str[0]) {
         int wout = 0;
         int th2 = render_md_text(cmaxw, lineh, content_x, HEADER_H + 8,
@@ -693,22 +824,37 @@ static void render_chat(void) {
                        g_todos_str, COL_TEXT3, COL_TEXT3, 0, &wout);
     }
 
-    /* 先测总高(桌面版对话流) */
+    /* 有内容变化的消息重渲染纹理 + 汇总总高 */
     int total_h = 0;
     for (int i = 0; i < g_nmsgs; i++) {
-        int mw = 0;
-        total_h += render_msg_flow(content_x, cmaxw, lineh, 0,
-                                   &g_msgs[i], 1, &mw) + 18;
+        msg_t *m = &g_msgs[i];
+        if (m->dirty) render_msg_texture(m, content_x, cmaxw, lineh);
+        total_h += m->tex_h + 18;
     }
+    evict_textures();
+
     int view_h = area_y1 - area_y0;
     int max_off = total_h > view_h ? total_h - view_h : 0;
     clamp_scroll(max_off);
     int y = area_y0 + g_scroll_offset - (total_h > view_h ? total_h - view_h : 0);
 
+    /* 可见区贴图 */
     for (int i = 0; i < g_nmsgs; i++) {
-        int mw = 0;
-        int hh = render_msg_flow(content_x, cmaxw, lineh, y, &g_msgs[i], 0, &mw);
-        y += hh + 18;
+        msg_t *m = &g_msgs[i];
+        int mh = m->tex_h;
+        if (y + mh < area_y0 || y > area_y1) {
+            y += mh + 18;
+            continue;
+        }
+        if (m->tex) {
+            SDL_Rect dst = { content_x, y, m->tex_w, mh };
+            SDL_RenderCopy(g_ren, m->tex, NULL, &dst);
+        } else {
+            /* 未缓存的超长消息:直接画 */
+            int mw = 0;
+            render_msg_flow(content_x, cmaxw, lineh, y, m, 0, &mw);
+        }
+        y += mh + 18;
     }
 
     /* 滚动条 */
@@ -722,41 +868,11 @@ static void render_chat(void) {
                        COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 200);
     }
 
-    /* 底栏(composer 风格:surface + 顶部发丝线) */
-    SDL_SetRenderDrawColor(g_ren, COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
-    SDL_Rect ftr = { 0, WIN_H - FOOTER_H, WIN_W, FOOTER_H };
-    SDL_RenderFillRect(g_ren, &ftr);
-    SDL_SetRenderDrawColor(g_ren, COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
-    SDL_Rect fhair = { 0, WIN_H - FOOTER_H, WIN_W, 1 };
-    SDL_RenderFillRect(g_ren, &fhair);
-
-    const char *hint = g_worker_busy
-                           ? (g_stream_think ? "思考中…(B 停止)    + 退出"
-                                             : "回复中…(B 停止)    + 退出")
-                           : (strcmp(g_cfg.backend, "harness") == 0
-                              ? "A输入 B停止 X工作区 Y设置 L模型 R后端 ZL更早 ZR最新 +退出"
-                              : "A输入 B停止 X清屏 Y设置 L模型 R后端 +退出");
-    ts = TTF_RenderUTF8_Blended(g_font_hint, hint, COL_HINT);
-    if (ts) {
-        SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-        SDL_Rect d = { 24, WIN_H - FOOTER_H + (FOOTER_H - ts->h) / 2, ts->w, ts->h };
-        SDL_RenderCopy(g_ren, tt, NULL, &d);
-        SDL_DestroyTexture(tt);
-        SDL_FreeSurface(ts);
-    }
-    if (g_nmsgs > 0 && g_msgs[g_nmsgs - 1].role == ROLE_ASSISTANT &&
-        !g_msgs[g_nmsgs - 1].done) {
-        ts = TTF_RenderUTF8_Blended(g_font_hint,
-                                    g_stream_think ? "思考中…" : "回复中…",
-                                    COL_ACCENT);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { WIN_W - ts->w - 24, WIN_H - FOOTER_H + (FOOTER_H - ts->h) / 2,
-                           ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
-        }
+    /* 底栏(缓存纹理) */
+    ensure_footer_tex();
+    if (g_ftr_tex) {
+        SDL_Rect fd = { 0, WIN_H - FOOTER_H, WIN_W, FOOTER_H };
+        SDL_RenderCopy(g_ren, g_ftr_tex, NULL, &fd);
     }
 }
 
@@ -1346,6 +1462,7 @@ static void render_choice(void) {
 static void clear_msgs(void) {
     while (g_nmsgs > 0) {
         g_nmsgs--;
+        msg_tex_destroy(&g_msgs[g_nmsgs]);
         free(g_msgs[g_nmsgs].text);
         free(g_msgs[g_nmsgs].think);
         free(g_msgs[g_nmsgs].tools);
@@ -2691,6 +2808,10 @@ static void prepend_msgs(chat_message_t *msgs, size_t n) {
         m->notice = NULL;
         m->role = msgs[skip + i].role;
         m->done = 1;
+        m->tex = NULL;
+        m->tex_w = 0;
+        m->tex_h = 0;
+        m->dirty = 1;
     }
     for (size_t i = 0; i < n; i++) free(msgs[i].content);
 }
@@ -2901,12 +3022,17 @@ int app_frame(void) {
 
 void app_exit(void) {
     for (int i = 0; i < g_nmsgs; i++) {
+        msg_tex_destroy(&g_msgs[i]);
         free(g_msgs[i].text);
         free(g_msgs[i].think);
         free(g_msgs[i].tools);
         free(g_msgs[i].notice);
     }
     g_nmsgs = 0;
+    if (g_hdr_tex) SDL_DestroyTexture(g_hdr_tex);
+    if (g_ftr_tex) SDL_DestroyTexture(g_ftr_tex);
+    g_hdr_tex = NULL;
+    g_ftr_tex = NULL;
     harness_sessions_free(g_sessions, g_sessions_n);
     g_sessions = NULL;
     g_sessions_n = 0;
