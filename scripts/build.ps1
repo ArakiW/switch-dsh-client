@@ -50,7 +50,7 @@ if ($rtSets -ne $rtResets) {
     throw "guard: unbalanced SDL_SetRenderTarget in app.c ($rtSets sets vs $rtResets resets)"
 }
 
-$common = @(
+$base = @(
     '--target=aarch64-none-elf','-D__SWITCH__','-D_REENTRANT',
     '-march=armv8-a+crc+crypto','-mcpu=cortex-a57','-mtp=tpidrro_el0',
     '-O2','-g','-fPIE','-ffunction-sections','-fdata-sections','-fno-strict-aliasing',
@@ -59,9 +59,20 @@ $common = @(
     '-isystem',(Join-Path $toolRoot 'devkitA64\aarch64-none-elf\include'),
     '-isystem',(Join-Path $toolRoot 'portlibs\switch\include'),
     '-isystem',(Join-Path $toolRoot 'portlibs\switch\include\SDL2'),
-    '-isystem',(Join-Path $toolRoot 'portlibs\switch\include\freetype2'),
-    '-I',(Join-Path $repo 'source'),
-    '-I',(Join-Path $repo 'libs\cjson')
+    '-isystem',(Join-Path $toolRoot 'portlibs\switch\include\freetype2')
+)
+$common = $base + @('-I',(Join-Path $repo 'source'), '-I',(Join-Path $repo 'libs\cjson'), '-I',(Join-Path $repo 'third_party\espeak-ng\src\include'))
+
+# espeak-ng(本地 TTS)的独立 include 集:不放 source/,避免与项目 config.h 冲突
+$espeakRoot = Join-Path $repo 'third_party\espeak-ng'
+$espeakCommon = $base + @(
+    '-DHAVE_CONFIG_H',
+    '-I',(Join-Path $espeakRoot 'switch-compat'),
+    '-I',(Join-Path $espeakRoot 'src\include'),
+    '-I',(Join-Path $espeakRoot 'src\include\compat'),
+    '-I',(Join-Path $espeakRoot 'src\libespeak-ng'),
+    '-I',(Join-Path $espeakRoot 'src\ucd-tools\src\include'),
+    '-I',$espeakRoot
 )
 
 $objects = @()
@@ -75,12 +86,21 @@ $sources = @(
     @('source\backend.c','backend.o'),
     @('source\backend_harness.c','backend_harness.o'),
     @('source\backend_deepseek.c','backend_deepseek.o'),
+    @('source\tts.c','tts.o'),
     @('libs\cjson\cJSON.c','cJSON.o')
 )
+
+# espeak-ng 库源文件(33 个:6 ucd + 27 libespeak-ng 基础源)
+$espeakLib = @('common','compiledata','compiledict','dictionary','encoding','error','espeak_api','ieee80','intonation','langopts','mnemonics','numbers','readclause','phoneme','phonemelist','setlengths','soundicon','spect','speech','ssml','synthdata','synthesize','translate','translateword','tr_languages','voices','wavegen')
+foreach ($f in $espeakLib) { $sources += ,@("third_party\espeak-ng\src\libespeak-ng\$f.c", "espeak_$f.o") }
+$espeakUcd = @('case','categories','ctype','proplist','scripts','tostring')
+foreach ($f in $espeakUcd) { $sources += ,@("third_party\espeak-ng\src\ucd-tools\src\$f.c", "espeak_ucd_$f.o") }
+
 foreach ($entry in $sources) {
     $object = Join-Path $build $entry[1]
+    $flags = if ($entry[0] -like 'third_party\espeak-ng\*') { $espeakCommon } else { $common }
     Write-Host "compiling $($entry[0])"
-    & (Join-Path $llvm 'clang.exe') @common -c (Join-Path $repo $entry[0]) -o $object
+    & (Join-Path $llvm 'clang.exe') @flags -c (Join-Path $repo $entry[0]) -o $object
     if ($LASTEXITCODE -ne 0) { throw "compile failed: $($entry[0])" }
     $objects += $object
 }
@@ -148,7 +168,7 @@ $nacp = Join-Path $build 'switch-dsh-client.nacp'
 $nro  = Join-Path $repo 'switch-dsh-client.nro'
 & (Join-Path $switchTools 'nacptool.exe') --create 'DSH Switch Client' 'switch-dsh-client' '0.1.0' $nacp
 if ($LASTEXITCODE -ne 0) { throw 'nacp failed' }
-& (Join-Path $switchTools 'elf2nro.exe') $elf $nro "--nacp=$nacp" "--icon=$(Join-Path $repo 'icon.jpg')"
+& (Join-Path $switchTools 'elf2nro.exe') $elf $nro "--nacp=$nacp" "--icon=$(Join-Path $repo 'icon.jpg')" "--romfsdir=$(Join-Path $repo 'romfs')"
 if ($LASTEXITCODE -ne 0) { throw 'nro failed' }
 
 Get-Item $nro | Select-Object FullName, Length

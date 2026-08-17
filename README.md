@@ -76,6 +76,13 @@
   * 对话历史保存在用户自己的 SD 卡
   * API Key 保存在用户自己的 SD 卡
 
+* **本地离线语音朗读（TTS）**
+
+  * 内置 espeak-ng 引擎，在 Switch 上离线合成
+  * 仅 Harness 后端时可用，AI 回复完成后自动朗读
+  * 按 `-`（减号键）可重新朗读最后一条回复
+  * 声音通过 3.5mm 耳机输出，可在设置中开关
+
 ---
 
 ## 📸 截图
@@ -165,6 +172,7 @@ API Key 仅作为本地配置持久化在用户自己的 SD 卡中。
 | 后端切换 | 在 Harness 与 DeepSeek 官方 API 之间切换               |
 | 模型切换 | 在 `deepseek-v4-pro` 与 `deepseek-v4-flash` 之间切换 |
 | 思考模式 | 在 `enabled` 与 `disabled` 之间切换                  |
+| 朗读回复 | 按 `-`（减号键）朗读最后一条助手回复（仅 Harness 后端）        |
 
 ---
 
@@ -272,6 +280,7 @@ make
 | **SDL2_image**       | 图像处理                          |
 | **libcurl**          | HTTP / HTTPS 与 SSE 网络通信       |
 | **cJSON**            | JSON 解析，vendored              |
+| **espeak-ng**        | 本地离线语音合成（TTS），vendored    |
 | **Noto Sans CJK SC** | 内嵌简体中文字体                      |
 
 客户端主体使用原生 C/C++ homebrew 技术栈实现。
@@ -299,5 +308,13 @@ Harness 模式额外使用零依赖 Node 脚本 `dsh-bridge`，负责局域网 R
 项目中 vendored 的 **cJSON** 采用：
 
 **MIT License**
+
+### espeak-ng
+
+语音朗读使用的 **espeak-ng**（`third_party/espeak-ng/`）采用：
+
+**GNU General Public License v3**（见 `third_party/espeak-ng/LICENSE-GPL3.txt`）
+
+由于本项目把 espeak-ng 静态链接进 `.nro`，该二进制的整体许可以 GPLv3 为准；项目自有源码（`source/`、`bridge/`、`scripts/`）仍为 MIT。
 
 使用、修改或重新分发时，请同时遵守对应组件的许可条款。

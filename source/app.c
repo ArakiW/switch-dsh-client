@@ -16,6 +16,7 @@
 #include "config.h"
 #include "net.h"
 #include "textinput.h"
+#include "tts.h"
 #include "util.h"
 
 #define WIN_W        1280
@@ -69,6 +70,7 @@ static PadState g_pad;
 static char g_input[4096];
 static int g_want_exit = 0;
 static int g_dirty = 1;
+static int g_voice_enabled = 1; /* 语音朗读开关(仅 Harness 后端生效) */
 static screen_t g_screen = SCREEN_CHOICE;
 static int g_set_idx = 0;
 static int g_choice_idx = 0;
@@ -527,6 +529,12 @@ static void drain_queue(void) {
             g_stream_think = 0;
             g_dirty = 1;
             save_current_history();
+            /* 助手回复完成:Harness 后端 + 语音开启时自动朗读 */
+            if (g_voice_enabled && strcmp(g_cfg.backend, "harness") == 0 &&
+                tts_available() && g_nmsgs > 0 &&
+                g_msgs[g_nmsgs - 1].text[0] != '\0') {
+                tts_speak(g_msgs[g_nmsgs - 1].text);
+            }
         } else if (ev.kind == 3) {
             if (g_nmsgs > 0) {
                 msg_t *m = &g_msgs[g_nmsgs - 1];
@@ -1299,7 +1307,7 @@ static void ensure_footer_tex(void) {
     else if (busy)
         hint = th ? "思考中…(B 停止)    + 退出" : "回复中…(B 停止)    + 退出";
     else
-        hint = be ? "A输入 B停止 X侧栏 Y设置 L模型 R后端 ZL更早 ZR最新 +退出"
+        hint = be ? "A输入 B停止 X侧栏 Y设置 L模型 R后端 -朗读 ZL更早 ZR最新 +退出"
                   : "A输入 B停止 X侧栏 Y设置 L模型 R后端 +退出";
     int hint_max = WIN_W - SB_W - 48 - (streaming ? 170 : 24);
     draw_trunc(g_font_hint, hint, COL_HINT, 24,
@@ -1536,7 +1544,7 @@ static char g_key_menu_msg[256];
 
 /* ---------- 设置界面 ---------- */
 
-#define SET_COUNT 7
+#define SET_COUNT 8
 
 static const char *set_label(int i) {
     switch (i) {
@@ -1547,6 +1555,7 @@ static const char *set_label(int i) {
         case 4: return "模型";
         case 5: return "思考模式";
         case 6: return "系统提示词";
+        case 7: return "语音朗读(仅 Harness)";
         default: return "";
     }
 }
@@ -1572,6 +1581,9 @@ static void set_value(int i, char *out, size_t outsz) {
         case 6:
             snprintf(out, outsz, "%s",
                      (g_cfg.system_prompt && g_cfg.system_prompt[0]) ? g_cfg.system_prompt : "(空)");
+            break;
+        case 7:
+            snprintf(out, outsz, "%s", g_voice_enabled ? "开" : "关");
             break;
         default: out[0] = '\0';
     }
@@ -1765,6 +1777,10 @@ static void settings_input(u64 kDown) {
                                                      ? "disabled" : "enabled");
                 break;
             case 6: set_edit_field(&g_cfg.system_prompt, "系统提示词", 1, 0); break;
+            case 7:
+                g_voice_enabled = !g_voice_enabled;
+                if (!g_voice_enabled) tts_stop();
+                break;
         }
         g_dirty = 1;
     }
@@ -3292,6 +3308,10 @@ int app_init(void) {
     g_q_mtx = SDL_CreateMutex();
     if (!g_q_mtx) return -1;
 
+    /* 本地离线 TTS(espeak-ng)。失败(无音频/缺数据)时静默禁用,不影响聊天。 */
+    if (tts_init() != 0)
+        printf("app: TTS 不可用(语音朗读禁用)\n");
+
     /* 恢复两套后端的本地聊天记录 */
     history_load(HIST_HARNESS, g_buf_h, &g_bufn_h);
     history_load(HIST_DEEPSEEK, g_buf_d, &g_bufn_d);
@@ -3424,6 +3444,19 @@ int app_frame(void) {
             g_scroll_offset = 0;
             g_dirty = 1;
         }
+        /* - :朗读最后一条助手消息(仅 Harness + 语音开启) */
+        if ((kDown & HidNpadButton_Minus) && !g_worker_busy) {
+            if (g_voice_enabled && strcmp(g_cfg.backend, "harness") == 0 &&
+                tts_available()) {
+                for (int i = g_nmsgs - 1; i >= 0; i--) {
+                    if (g_msgs[i].role == ROLE_ASSISTANT &&
+                        g_msgs[i].text && g_msgs[i].text[0]) {
+                        tts_speak(g_msgs[i].text);
+                        break;
+                    }
+                }
+            }
+        }
         /* 方向键 / 右摇杆滚动历史(侧栏焦点时不滚) */
         if (!g_focus) {
             u64 held = padGetButtons(&g_pad);
@@ -3445,6 +3478,7 @@ int app_frame(void) {
     }
 
     drain_queue();
+    tts_poll(); /* 每帧:取合成结果、向音频设备喂数据 */
 
     if (g_dirty) {
         if (g_screen == SCREEN_CHOICE) render_choice();
@@ -3504,6 +3538,7 @@ void app_exit(void) {
     if (g_font_title) TTF_CloseFont(g_font_title);
     if (g_font_hint) TTF_CloseFont(g_font_hint);
     TTF_Quit();
+    tts_quit();
     if (g_ren) SDL_DestroyRenderer(g_ren);
     if (g_win) SDL_DestroyWindow(g_win);
     SDL_Quit();

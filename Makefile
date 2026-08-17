@@ -19,9 +19,9 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET		:=	switch-dsh-client
 BUILD		:=	build
-SOURCES		:=	source libs/cjson
+SOURCES		:=	source libs/cjson third_party/espeak-ng/src/libespeak-ng third_party/espeak-ng/src/ucd-tools/src
 DATA		:=
-INCLUDES	:=	source libs/cjson
+INCLUDES	:=	third_party/espeak-ng/switch-compat third_party/espeak-ng source libs/cjson third_party/espeak-ng/src/include third_party/espeak-ng/src/include/compat third_party/espeak-ng/src/libespeak-ng third_party/espeak-ng/src/ucd-tools/src/include
 ROMFS		:=	romfs
 ICON		:=	icon.jpg
 
@@ -35,7 +35,7 @@ APP_VERSION	:=	0.1.0
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
 CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
-			$(ARCH) $(DEFINES)
+			$(ARCH) $(DEFINES) -DHAVE_CONFIG_H
 
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__
 
