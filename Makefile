@@ -37,7 +37,7 @@ ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 			$(ARCH) $(DEFINES) -DHAVE_CONFIG_H
 
-CFLAGS	+=	$(INCLUDE) -D__SWITCH__
+CFLAGS	+=	$(INCLUDE) -D__SWITCH__ -I$(PORTLIBS)/include/SDL2 -I$(PORTLIBS)/include/freetype2
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 
