@@ -9,6 +9,17 @@
 *.kip
 *.lst
 *.map
+*.log
 
 build/
 out/
+
+# host 测试产物
+tests/*.exe
+
+# 密钥与本地数据(严禁提交!)
+deepseek_api_key.txt
+history_harness.json
+history_deepseek.json
+session_id.txt
+config.json

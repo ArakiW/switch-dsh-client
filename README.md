@@ -141,6 +141,17 @@ Harness 模式补充:
 - 流式期间:思考过程(暗色)、**工具活动行**、**审批/提问提醒**(红色,提示去电脑端处理)、**任务清单条**(顶部)、B 停止生成
 - 轻量 Markdown:`#` 标题加粗、`**粗体**`、``` 代码块(换色+缩进背景)
 
+## 发布到 GitHub
+
+仓库已为开源做好准备(LICENSE=MIT、CI、.gitignore):
+
+1. 在 GitHub 新建空仓库(或 `gh repo create`)
+2. 推送:`git remote add origin <你的仓库地址>` → `git push -u origin master`
+3. 推送后 **GitHub Actions 自动构建**(devkitpro/devkitarm 镜像),Artifacts 里可直接下载 .nro
+4. 发版本:`git tag v0.1.0 && git push --tags` → 自动创建 **GitHub Release 并附上 .nro**,Switch 用户解压即装
+
+> 🔒 安全:你的 API Key 保存在 SD 卡上,`.gitignore` 已排除 `deepseek_api_key.txt` 等本地数据文件 —— **永远不要手动 `git add` 这些文件**。仓库历史已经过扫描,不含任何密钥。
+
 ## 测试状态
 
 - ✅ dsh-bridge 三项能力(POST 转发 / WS→SSE / 会话过滤)对真实 DSH 实测通过
