@@ -1,7 +1,7 @@
 name: Build switch-dsh-client (.nro)
 
 # 本地没有 devkitPro 时的编译验证通道:
-# 推到 GitHub 后自动用 devkitpro/devkitarm 镜像交叉编译并产出 .nro;
+# 推到 GitHub 后自动用 devkitpro/devkita64 镜像交叉编译并产出 .nro;
 # 打 v* 标签时额外发布 GitHub Release(附 .nro 可直接装 SD 卡)。
 on:
   push:
@@ -15,7 +15,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: devkitpro/devkitarm:latest
+    container: devkitpro/devkita64:latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
