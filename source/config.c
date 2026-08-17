@@ -71,6 +71,7 @@ void config_free(backend_config_t *cfg) {
     free(cfg->model);
     free(cfg->deepseek_thinking);
     free(cfg->system_prompt);
+    free(cfg->stt_url);
     memset(cfg, 0, sizeof(*cfg));
 }
 
@@ -82,6 +83,7 @@ void config_apply_defaults(backend_config_t *cfg) {
     cfg->model             = dupstr("deepseek-v4-pro");
     cfg->deepseek_thinking = dupstr("disabled");
     cfg->system_prompt     = dupstr("");
+    cfg->stt_url           = dupstr("");
 }
 
 int config_load(backend_config_t *cfg) {
@@ -110,6 +112,7 @@ int config_load(backend_config_t *cfg) {
     if ((s = json_str(root, "model")))             { free(cfg->model);             cfg->model             = dupstr(s); }
     if ((s = json_str(root, "deepseek_thinking"))) { free(cfg->deepseek_thinking); cfg->deepseek_thinking = dupstr(s); }
     if ((s = json_str(root, "system_prompt")))     { free(cfg->system_prompt);     cfg->system_prompt     = dupstr(s); }
+    if ((s = json_str(root, "stt_url")))           { free(cfg->stt_url);           cfg->stt_url           = dupstr(s); }
 
     cJSON_Delete(root);
 
@@ -134,6 +137,7 @@ int config_save(const backend_config_t *cfg) {
     cJSON_AddStringToObject(root, "model",            cfg->model);
     cJSON_AddStringToObject(root, "deepseek_thinking", cfg->deepseek_thinking);
     cJSON_AddStringToObject(root, "system_prompt",    cfg->system_prompt);
+    cJSON_AddStringToObject(root, "stt_url",          cfg->stt_url);
 
     char *pretty = cJSON_Print(root);
     cJSON_Delete(root);

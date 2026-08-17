@@ -19,6 +19,13 @@ int net_post_json(const char *url, const char *body, net_buffer_t *out,
                   long *http_code, char *err, size_t errsz);
 
 /*
+ * POST 二进制音频(WAV,Content-Type: audio/wav)并收集响应体。
+ * data/len 为原始字节(可含 \0)。其余语义同 net_post_json。
+ */
+int net_post_audio(const char *url, const void *data, size_t len,
+                   net_buffer_t *out, long *http_code, char *err, size_t errsz);
+
+/*
  * GET 请求并收集响应体(headers 为附加头数组,n_headers 条,可为空)。
  * 返回 0 传输成功,-1 失败。out 由调用方释放。
  */

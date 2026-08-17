@@ -5,5 +5,6 @@
   "deepseek_api_key": "",
   "model": "deepseek-v4-pro",
   "deepseek_thinking": "disabled",
-  "system_prompt": ""
+  "system_prompt": "",
+  "stt_url": ""
 }

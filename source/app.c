@@ -15,6 +15,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "net.h"
+#include "stt.h"
 #include "textinput.h"
 #include "tts.h"
 #include "util.h"
@@ -407,6 +408,7 @@ static void cfg_clone(backend_config_t *dst, const backend_config_t *src) {
     dst->model             = strdup(src->model ? src->model : "");
     dst->deepseek_thinking = strdup(src->deepseek_thinking ? src->deepseek_thinking : "");
     dst->system_prompt     = strdup(src->system_prompt ? src->system_prompt : "");
+    dst->stt_url           = strdup(src->stt_url ? src->stt_url : "");
 }
 
 static int worker_fn(void *arg) {
@@ -453,6 +455,36 @@ static void start_worker(void) {
         free(wa);
         g_worker_busy = 0;
     }
+}
+
+/* ---- STT(语音输入)后台转写 ---- */
+static volatile int g_stt_busy = 0;
+
+static int stt_thread_fn(void *arg) {
+    char *url = (char *)arg;
+    char text[4096];
+    char err[256];
+    if (stt_transcribe(url, text, sizeof(text), err, sizeof(err)) == 0)
+        push_event(8, text);
+    else
+        push_event(9, err[0] ? err : "转写失败");
+    free(url);
+    g_stt_busy = 0;
+    return 0;
+}
+
+static void stt_transcribe_async(void) {
+    if (g_stt_busy) return;
+    if (!g_cfg.stt_url || !g_cfg.stt_url[0]) {
+        add_msg(ROLE_ASSISTANT, "未配置 STT 地址(设置 → STT 服务地址)", 1);
+        return;
+    }
+    g_stt_busy = 1;
+    char *url = strdup(g_cfg.stt_url);
+    if (!url) { g_stt_busy = 0; return; }
+    SDL_Thread *th = SDL_CreateThread(stt_thread_fn, "stt", url);
+    if (th) SDL_DetachThread(th);
+    else { free(url); g_stt_busy = 0; }
 }
 
 static void drain_queue(void) {
@@ -553,6 +585,17 @@ static void drain_queue(void) {
             }
             g_dirty = 1;
             save_current_history();
+        } else if (ev.kind == 8) {
+            /* STT 转写成功:作为用户消息发送 */
+            if (!g_worker_busy && ev.text && ev.text[0]) {
+                add_msg(ROLE_USER, ev.text, 1);
+                add_msg(ROLE_ASSISTANT, "", 0);
+                start_worker();
+            }
+            g_dirty = 1;
+        } else if (ev.kind == 9) {
+            add_msg(ROLE_ASSISTANT, ev.text ? ev.text : "语音输入失败", 1);
+            g_dirty = 1;
         }
         free(ev.text);
     }
@@ -1307,7 +1350,7 @@ static void ensure_footer_tex(void) {
     else if (busy)
         hint = th ? "思考中…(B 停止)    + 退出" : "回复中…(B 停止)    + 退出";
     else
-        hint = be ? "A输入 B停止 X侧栏 Y设置 L模型 R后端 -朗读 ZL更早 ZR最新 +退出"
+        hint = be ? "A输入 B停止 X侧栏 Y设置 L模型 R后端 -朗读 ZR录音 ZL更早 +退出"
                   : "A输入 B停止 X侧栏 Y设置 L模型 R后端 +退出";
     int hint_max = WIN_W - SB_W - 48 - (streaming ? 170 : 24);
     draw_trunc(g_font_hint, hint, COL_HINT, 24,
@@ -1544,7 +1587,7 @@ static char g_key_menu_msg[256];
 
 /* ---------- 设置界面 ---------- */
 
-#define SET_COUNT 8
+#define SET_COUNT 9
 
 static const char *set_label(int i) {
     switch (i) {
@@ -1556,6 +1599,7 @@ static const char *set_label(int i) {
         case 5: return "思考模式";
         case 6: return "系统提示词";
         case 7: return "语音朗读(仅 Harness)";
+        case 8: return "STT 服务地址";
         default: return "";
     }
 }
@@ -1584,6 +1628,10 @@ static void set_value(int i, char *out, size_t outsz) {
             break;
         case 7:
             snprintf(out, outsz, "%s", g_voice_enabled ? "开" : "关");
+            break;
+        case 8:
+            snprintf(out, outsz, "%s",
+                     (g_cfg.stt_url && g_cfg.stt_url[0]) ? g_cfg.stt_url : "(空)");
             break;
         default: out[0] = '\0';
     }
@@ -1780,6 +1828,10 @@ static void settings_input(u64 kDown) {
             case 7:
                 g_voice_enabled = !g_voice_enabled;
                 if (!g_voice_enabled) tts_stop();
+                break;
+            case 8:
+                set_edit_field(&g_cfg.stt_url,
+                               "STT 服务地址(如 http://192.168.1.10:9000)", 0, 0);
                 break;
         }
         g_dirty = 1;
@@ -3312,6 +3364,10 @@ int app_init(void) {
     if (tts_init() != 0)
         printf("app: TTS 不可用(语音朗读禁用)\n");
 
+    /* 语音输入 STT(audin 麦克风)。失败时静默禁用。 */
+    if (stt_init() != 0)
+        printf("app: STT 不可用(语音输入禁用,请检查 3.5mm 头戴麦克风)\n");
+
     /* 恢复两套后端的本地聊天记录 */
     history_load(HIST_HARNESS, g_buf_h, &g_bufn_h);
     history_load(HIST_DEEPSEEK, g_buf_d, &g_bufn_d);
@@ -3438,11 +3494,22 @@ int app_frame(void) {
             }
             printf("cancel requested\n");
         }
-        /* ZL:加载更早历史 / ZR:回到最新 */
+        /* ZL:加载更早历史 / 右摇杆按下:回到最新 */
         if ((kDown & HidNpadButton_ZL) && !g_worker_busy) chat_load_older();
-        if ((kDown & HidNpadButton_ZR) && !g_worker_busy) {
+        if ((kDown & HidNpadButton_StickR) && !g_worker_busy) {
             g_scroll_offset = 0;
             g_dirty = 1;
+        }
+        /* ZR 按住:语音输入(录音),松开转写并发送(仅 Harness + 已配 STT) */
+        if (!g_focus && strcmp(g_cfg.backend, "harness") == 0 &&
+            stt_available() && !g_worker_busy && !g_stt_busy) {
+            u64 heldstt = padGetButtons(&g_pad);
+            if (heldstt & HidNpadButton_ZR) {
+                if (!stt_recording()) stt_begin();
+            } else if (stt_recording()) {
+                stt_end();
+                stt_transcribe_async();
+            }
         }
         /* - :朗读最后一条助手消息(仅 Harness + 语音开启) */
         if ((kDown & HidNpadButton_Minus) && !g_worker_busy) {
@@ -3479,6 +3546,7 @@ int app_frame(void) {
 
     drain_queue();
     tts_poll(); /* 每帧:取合成结果、向音频设备喂数据 */
+    stt_poll(); /* 每帧:录音期间收集已释放的麦克风缓冲 */
 
     if (g_dirty) {
         if (g_screen == SCREEN_CHOICE) render_choice();
@@ -3539,6 +3607,7 @@ void app_exit(void) {
     if (g_font_hint) TTF_CloseFont(g_font_hint);
     TTF_Quit();
     tts_quit();
+    stt_quit();
     if (g_ren) SDL_DestroyRenderer(g_ren);
     if (g_win) SDL_DestroyWindow(g_win);
     SDL_Quit();

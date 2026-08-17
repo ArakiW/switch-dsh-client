@@ -32,6 +32,7 @@ typedef struct {
     char *model;              /* deepseek-v4-flash / deepseek-v4-pro 等 */
     char *deepseek_thinking;  /* "enabled" | "disabled"(默认) */
     char *system_prompt;      /* 可为 NULL 或空串 */
+    char *stt_url;            /* STT 转写服务地址(空串=禁用语音输入) */
 } backend_config_t;
 
 /*

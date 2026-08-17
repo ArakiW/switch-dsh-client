@@ -87,6 +87,7 @@ $sources = @(
     @('source\backend_harness.c','backend_harness.o'),
     @('source\backend_deepseek.c','backend_deepseek.o'),
     @('source\tts.c','tts.o'),
+    @('source\stt.c','stt.o'),
     @('libs\cjson\cJSON.c','cJSON.o')
 )
 
