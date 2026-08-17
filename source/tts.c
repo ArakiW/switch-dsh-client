@@ -29,7 +29,7 @@ static size_t g_pending_n     = 0;
 static int    g_pending_rate  = 0;
 static int    g_pending_ready = 0;
 static volatile int g_tts_synth_busy = 0; /* 是否还有在途合成 */
-static int    g_tts_gen = 0;              /* 代际,失效在途合成 */
+static volatile int g_tts_gen = 0;         /* 代际,失效在途合成 */
 
 /* 合成线程内部积累缓冲(同一时刻只有一个合成线程在用) */
 static short *g_synth_pcm = NULL;
