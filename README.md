@@ -1,142 +1,303 @@
 # switch-dsh-client
 
-> 在 Nintendo Switch 上使用 DeepSeek 的 AI 聊天客户端(homebrew 自制程序)。
-> *A DeepSeek AI chat client for the Nintendo Switch (homebrew).*
+> A native DeepSeek AI chat client for Nintendo Switch homebrew.
 
-`switch-dsh-client` 是一个运行在已破解 Switch 上的自制程序,让你用手柄和触摸屏与 DeepSeek 对话。基于 libnx + SDL2 + libcurl 原生实现,支持两个后端一键切换、流式输出、中文拼音输入,界面风格对齐桌面版 DeepSeek Harness 的对话工作区。
+`switch-dsh-client` 是一个运行在**已破解 Nintendo Switch** 上的 DeepSeek AI 聊天客户端，使用 **libnx + SDL2 + libcurl** 原生实现。
 
-## ✨ 特性
+项目支持两种后端，可在客户端内一键切换，并分别保存各自的对话记录：
 
-- **双后端一键切换** —— ① 局域网 DeepSeek Harness(经 `dsh-bridge` 桥接)② DeepSeek 官方 API 直连;两套对话独立保存、互不干扰
-- **流式输出** —— SSE 逐字渲染,60fps 平滑滚动;支持**思考过程**(暗色缩进)、工具活动行、审批/提问提醒、任务清单条
-- **桌面同款工作区** —— 左侧会话栏(按工作区分组)、新建/分叉/重命名会话、工作区管理、模型与推理强度切换
-- **中文输入** —— 调用系统软键盘 swkbd,原生简体中文拼音输入,免外接键盘
-- **触摸 + 手柄双操作** —— 手指拖动滚动/点选、方向键、右摇杆、ZL/ZR 翻页,手感对齐桌面滚动
-- **数据本地化** —— 配置、对话历史、API Key 都只保存在你自己的 SD 卡上
-- **零配置发布** —— GitHub Actions 自动构建 `.nro`,Release 附带成品,解压即装
-
-## 📸 截图
-
-> 待补充:启动后端选择界面、对话界面(双栏)、设置界面。
-
-## 🚀 快速开始
-
-### 安装到 Switch
-
-1. 下载最新 Release 的 `switch-dsh-client.nro`(或自行构建,见下文「构建」)
-2. 放入 SD 卡 `switch/` 目录,在 hbmenu 里直接运行(或用 NRO 前向器做成桌面图标)
-3. 首次启动使用内置默认配置;配置自动保存到 `sdmc:/switch/switch-dsh-client/config.json`
-
-### 选择后端
-
-| 后端 | 说明 | 适合场景 |
-| --- | --- | --- |
-| **Harness** | 连你电脑上运行的 DeepSeek Harness,复用现有会话/模型/工作区 | 已有 Harness 环境,想续用桌面端会话 |
-| **DeepSeek 官方 API** | 直连 `api.deepseek.com`,只填 API Key 即可 | 无自建服务,开箱即用 |
-
-### 后端 A:连本机 DeepSeek Harness(推荐)
-
-先在 Harness 所在的电脑上启动桥接(任选其一):
-
-- **一键脚本**:双击 `start-bridge.bat`,窗口会显示本机局域网 IP;
-- **Harness 网页按钮(推荐)**:安装本仓库附带的一键启动插件:
-
-  ```bash
-  dsh plugin --profile web add github:ArakiW/switch-dsh-client
-  # 重启 DSH 后,网页右下角出现可拖动的桥接启停按钮
-  ```
-
-- **手动运行**:
-
-  ```bash
-  node bridge/dsh-bridge.js [--dsh http://127.0.0.1:3080] [--host 0.0.0.0] [--port 8765]
-  ```
-
-然后在 Switch 端:启动选 `Harness`,设置里 Harness 地址填 `http://<电脑局域网IP>:8765`。
-
-> ⚠️ 安全提示:Harness API 无鉴权,桥接**只应在可信局域网**运行,切勿暴露到公网。防火墙拦截时放行 Node 的 8765 端口即可。
-
-### 后端 B:直连 DeepSeek 官方 API
-
-设置界面里:后端切到 `DeepSeek` → 填入 API Key → 选择模型(`deepseek-v4-pro` / `deepseek-v4-flash`)与思考模式(`enabled` 显示思维链,`disabled` 响应更快)。HTTPS 走 Switch 系统 SSL,无需配置证书。
-
-## ⌨️ 操作指南
-
-| 按键 | 启动界面 | 聊天界面(双栏) | 设置界面 |
-| --- | --- | --- | --- |
-| A | 确定后端 | 输入消息;侧栏焦点时打开会话 | 修改/切换当前项 |
-| B | — | 停止生成;侧栏焦点时回对话 | 保存并返回 |
-| X | — | 对话 / 侧栏焦点切换 | — |
-| Y | — | 打开设置 | — |
-| L | — | 切换模型 + 推理强度 | — |
-| R | — | 切换后端(两套对话独立) | — |
-| ZL | — | 加载更早历史 | — |
-| ZR | — | 回到最新 | — |
-| ↑/↓/←/→ | 切换后端 | 侧栏移动 / 滚动对话 | 选择设置项 |
-| + | 退出 | 退出 | 退出 |
-
-聊天界面触摸操作:手指按住上下划动滚动、轻点点选、点底部栏输入。
-
-## ⚙️ 配置
-
-### config.json 字段
-
-| 字段 | 说明 |
-| --- | --- |
-| `backend` | `"harness"` 或 `"deepseek"` |
-| `harness_base_url` | 指向 dsh-bridge,如 `http://192.168.1.10:8765` |
-| `deepseek_base_url` | 默认 `https://api.deepseek.com` |
-| `deepseek_api_key` | DeepSeek API Key |
-| `model` | 模型名(默认 `deepseek-v4-pro`) |
-| `deepseek_thinking` | `"enabled"` / `"disabled"` |
-| `system_prompt` | 系统提示词(可空) |
-
-### API Key 免手输
-
-在 Switch 上敲 Key 太麻烦,可在电脑上直接写好文本文件:
-
-1. 在 `sdmc:/switch/switch-dsh-client/` 新建 `deepseek_api_key.txt`,内容就是一行 Key(前后空白自动忽略)
-2. 应用每次启动自动读取;该文件非空时优先于 config.json
-3. 设置界面里仍可修改,修改后自动同步写回 key.txt
-
-> 🔒 Key 只保存在你自己的 SD 卡上,不会同步到别处。**不要把它提交到 git 或发给别人。**
-
-## 🔨 构建
-
-### 本机 Windows
-
-前置:devkitA64 sysroot + LLVM + switch-tools(依赖目录用 `DSH_SWITCH_DEPS` 环境变量指定,详见 `scripts/build.ps1`)。
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build.ps1
-# 产物:switch-dsh-client.nro(约 25MB,内置 Noto Sans CJK 字体)
-```
-
-### 标准 devkitPro / CI
-
-```bash
-export DEVKITPRO=/opt/devkitpro
-make -j$(nproc)
-# 字体走 romfs 路径(app.c 已做 romfs→嵌入内存 两级回退)
-```
-
-GitHub Actions 见 `.github/workflows/build.yml`,推送即自动出 `.nro`,打 tag 自动发 Release。
-
-## 🛠 技术栈
-
-- **平台**:libnx(自制程序框架)
-- **渲染/输入**:SDL2、SDL2_ttf、SDL2_gfx、SDL2_image
-- **网络**:libcurl(HTTPS + SSE 流式)
-- **字体**:Noto Sans CJK SC(SIL OFL 1.1)
-- **JSON**:vendored cJSON
-- **桥接**:`bridge/dsh-bridge.js`(零依赖 Node,把 Harness 回环 API + WebSocket 转成局域网可达的 HTTP + SSE)
-
-## 📄 许可
-
-- 项目代码:**MIT** — 见 [`LICENSE`](LICENSE)
-- 嵌入字体 Noto Sans CJK SC:**SIL OFL 1.1** — 见 `LICENSE-FONTS.txt`
-- vendored cJSON:**MIT** — 见 `libs/cjson/`
+* **局域网 DeepSeek Harness**：通过零依赖 Node 桥接脚本 `dsh-bridge` 转发 HTTP RPC，并将 WebSocket 转换为 SSE。
+* **DeepSeek 官方 API**：直接通过 HTTPS + SSE 连接，使用 Bearer API Key 认证。
 
 ---
 
-*项目由 [ArakiW](https://github.com/ArakiW) 维护,欢迎 issue 与 PR。*
+## ✨ 特性
+
+* **双后端支持**
+
+  * 局域网 DeepSeek Harness
+  * DeepSeek 官方 API
+  * 客户端内一键切换
+  * 两套后端的对话记录独立保存
+
+* **SSE 流式响应**
+
+  * 支持逐字流式输出
+  * DeepSeek 官方 API 使用 HTTPS + SSE
+  * Harness 通过 `dsh-bridge` 将 WebSocket 转换为 SSE
+
+* **思考过程显示**
+
+  * 思考内容使用暗色、缩进样式展示
+  * 与最终回答保持视觉区分
+
+* **任务状态展示**
+
+  * 工具活动行
+  * 审批提醒
+  * 提问提醒
+  * 任务清单条
+
+* **双栏工作区界面**
+
+  * 左侧：会话列表，并按工作区分组
+  * 右侧：当前对话流
+  * 整体交互风格对齐桌面版 DeepSeek 工作区
+
+* **会话与工作区管理**
+
+  * 新建会话
+  * 分叉会话
+  * 重命名会话
+  * 工作区管理
+
+* **聊天页模型设置**
+
+  * `deepseek-v4-pro`
+  * `deepseek-v4-flash`
+  * 思考模式 `enabled / disabled`
+  * 可直接在聊天页面切换模型与思考模式
+
+* **中文输入**
+
+  * 调用 Nintendo Switch 系统软键盘 `swkbd`
+  * 支持简体中文拼音输入
+
+* **触摸 + 手柄双操作**
+
+  * 触摸拖动滚动
+  * 触摸点选
+  * 手柄操作
+  * 60 FPS 平滑滚动
+
+* **本地数据保存**
+
+  * 配置保存在用户自己的 SD 卡
+  * 对话历史保存在用户自己的 SD 卡
+  * API Key 保存在用户自己的 SD 卡
+
+---
+
+## 📸 截图
+
+> 待补充。
+
+---
+
+## 🚀 快速开始
+
+### 1. 安装到 Nintendo Switch
+
+准备一台能够运行 homebrew 的 Nintendo Switch。
+
+获取构建完成的 `.nro` 文件后，将其放入 Switch SD 卡上的 homebrew 应用目录，并通过 Homebrew Menu 启动 `switch-dsh-client`。
+
+GitHub Actions 会自动构建 `.nro` 成品；创建 Git tag 时会自动生成对应 Release。
+
+---
+
+### 2. 选择后端
+
+`switch-dsh-client` 支持两种后端，两者可以在客户端内切换，且对话记录彼此独立。
+
+#### 方式 A：局域网 DeepSeek Harness
+
+适合已经在局域网内运行 DeepSeek Harness 的环境。
+
+在与 Switch 同一局域网中的设备上运行 `dsh-bridge`。
+
+`dsh-bridge` 是一个**零依赖 Node 桥接脚本**，负责：
+
+1. 接收 Switch 客户端请求
+2. 转发 Harness HTTP RPC
+3. 将 Harness WebSocket 数据转换为 SSE
+4. 在局域网端口 `8765` 提供服务
+
+例如，运行桥接服务的设备地址为：
+
+```text
+192.168.1.10
+```
+
+则 Switch 端连接目标为：
+
+```text
+http://192.168.1.10:8765
+```
+
+Switch 与运行 `dsh-bridge` 的设备需要能够通过局域网互相访问。
+
+---
+
+#### 方式 B：DeepSeek 官方 API
+
+客户端也可以直接连接 DeepSeek 官方 API，无需局域网 Harness。
+
+该模式使用：
+
+```text
+HTTPS + SSE
+```
+
+认证方式为：
+
+```text
+Bearer API Key
+```
+
+将自己的 DeepSeek API Key 保存到客户端使用的 API Key 文本文件中，然后在客户端切换至官方 API 后端即可。
+
+API Key 仅作为本地配置持久化在用户自己的 SD 卡中。
+
+---
+
+## ⌨️ 操作指南
+
+`switch-dsh-client` 同时支持触摸屏与手柄操作。
+
+| 操作   | 功能                                             |
+| ---- | ---------------------------------------------- |
+| 触摸点选 | 选择会话、工作区或界面项目                                  |
+| 触摸拖动 | 滚动会话列表或对话内容                                    |
+| 手柄导航 | 在界面项目之间移动与选择                                   |
+| 文本输入 | 调用 Switch 系统软键盘 `swkbd`                        |
+| 中文输入 | 使用系统软键盘进行简体中文拼音输入                              |
+| 后端切换 | 在 Harness 与 DeepSeek 官方 API 之间切换               |
+| 模型切换 | 在 `deepseek-v4-pro` 与 `deepseek-v4-flash` 之间切换 |
+| 思考模式 | 在 `enabled` 与 `disabled` 之间切换                  |
+
+---
+
+## ⚙️ 配置
+
+客户端的配置、对话历史和 API Key 均保存在用户自己的 SD 卡上。
+
+### `config.json`
+
+客户端配置保存在 SD 卡的 `sdmc:/switch/switch-dsh-client/config.json`；仓库内的 `config.json.example` 为参考模板。
+
+| 字段                  | 说明                                | 示例                                 |
+| ------------------- | --------------------------------- | ---------------------------------- |
+| `backend`           | 后端类型：`harness` 或 `deepseek`         | `harness`                          |
+| `harness_base_url`  | Harness 桥接地址（主机 + 端口）              | `http://192.168.1.10:8765`         |
+| `deepseek_base_url` | DeepSeek 官方 API 地址                 | `https://api.deepseek.com`         |
+| `deepseek_api_key`  | 官方 API 密钥（可留空，改用 key.txt）         |                                    |
+| `model`             | 模型                                | `deepseek-v4-pro`                  |
+| `deepseek_thinking` | 思考模式                              | `enabled` / `disabled`             |
+| `system_prompt`     | 系统提示词（可选）                         |                                    |
+
+`model` 与 `deepseek_thinking` 也可以直接在聊天页面中切换。
+
+### API Key 文本文件
+
+使用 DeepSeek 官方 API 后端时，需要提供自己的 API Key。
+
+API Key 使用独立的纯文本文件保存在 SD 卡：
+
+```text
+sdmc:/switch/switch-dsh-client/deepseek_api_key.txt
+```
+
+- 文件内容为一行 API Key（前后空白会被自动忽略）
+- 该文件存在且非空时，优先于 `config.json` 中的 `deepseek_api_key` 字段
+- 在 Switch 的「设置 → API Key」菜单可选择「从 key.txt 读取」
+- 该文件已被 `.gitignore` 排除，请勿提交或公开
+
+Harness 后端不使用 DeepSeek 官方 API Key。
+
+---
+
+## 🔨 构建
+
+项目支持两种构建方式。
+
+### Windows：clang + ld.lld
+
+Windows 环境下可以使用：
+
+* `clang`
+* `ld.lld`
+
+进行 Nintendo Switch 目标的交叉编译。
+
+依赖目录通过环境变量：
+
+```text
+DSH_SWITCH_DEPS
+```
+
+指定。
+
+例如：
+
+```powershell
+$env:DSH_SWITCH_DEPS = "<依赖目录>"
+```
+
+随后使用仓库对应的 Windows 构建入口进行编译。
+
+---
+
+### devkitPro
+
+项目同时支持标准 devkitPro 构建环境。
+
+在配置好 Nintendo Switch homebrew 开发环境后，可以使用：
+
+```bash
+make
+```
+
+进行构建。
+
+---
+
+### GitHub Actions
+
+仓库配置了 GitHub Actions 自动构建：
+
+* 自动生成 `.nro` 构建产物
+* 创建 Git tag 时自动发布对应 Release
+
+---
+
+## 🛠 技术栈
+
+| 组件                   | 用途                            |
+| -------------------- | ----------------------------- |
+| **libnx**            | Nintendo Switch homebrew 原生接口 |
+| **SDL2**             | 界面、输入与渲染基础                    |
+| **SDL2_ttf**         | 字体渲染                          |
+| **SDL2_gfx**         | SDL2 图形辅助                     |
+| **SDL2_image**       | 图像处理                          |
+| **libcurl**          | HTTP / HTTPS 与 SSE 网络通信       |
+| **cJSON**            | JSON 解析，vendored              |
+| **Noto Sans CJK SC** | 内嵌简体中文字体                      |
+
+客户端主体使用原生 C/C++ homebrew 技术栈实现。
+
+Harness 模式额外使用零依赖 Node 脚本 `dsh-bridge`，负责局域网 RPC 转发以及 WebSocket 到 SSE 的转换。
+
+---
+
+## 📄 许可
+
+### 项目代码
+
+`switch-dsh-client` 项目代码采用：
+
+**MIT License**
+
+### Noto Sans CJK SC
+
+项目内嵌的 **Noto Sans CJK SC** 字体采用：
+
+**SIL Open Font License 1.1**
+
+### cJSON
+
+项目中 vendored 的 **cJSON** 采用：
+
+**MIT License**
+
+使用、修改或重新分发时，请同时遵守对应组件的许可条款。
