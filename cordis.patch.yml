@@ -1,0 +1,7 @@
+# dsh-bridge-launcher bundle 层:把一键桥接按钮插件挂进 DSH。
+# 安装:dsh plugin --profile web add github:ArakiW/switch-dsh-client
+# 生效:重启 DSH 后,网页右下角出现 Switch 桥接启停按钮。
+- insert:
+    - id: dsh-bridge-launcher
+      name: '@dsh-external/dsh-bridge-launcher'
+      config: {}
