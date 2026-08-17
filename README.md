@@ -23,13 +23,13 @@ Switch(本应用)
   └─ backend "deepseek":HTTPS POST /chat/completions(SSE)──直连──▶ api.deepseek.com
 ```
 
-为什么需要 dsh-bridge:DSH 的 Web 服务只监听 `127.0.0.1`(CLI 明确拒绝 `0.0.0.0`),且下行事件只有 WebSocket;桥接进程既解决局域网可达性,又把 WS 翻译成 SSE,让 Switch 端网络层只需 libcurl 一种代码。协议细节见 `DSH_API_SPEC.md`。
+为什么需要 dsh-bridge:DSH 的 Web 服务只监听 `127.0.0.1`(CLI 明确拒绝 `0.0.0.0`),且下行事件只有 WebSocket;桥接进程既解决局域网可达性,又把 WS 翻译成 SSE,让 Switch 端网络层只需 libcurl 一种代码。
 
 ## 构建
 
 ### 本机 Windows(已验证)
 
-前置:本机存在 devkitA64 sysroot + LLVM + switch-tools(本机沿用 F1RaceWatch 项目的工具链,路径硬编码在 `scripts/build.ps1` 里,可自行修改)。
+前置:本机存在 devkitA64 sysroot + LLVM + switch-tools(依赖目录可通过 `DSH_SWITCH_DEPS` 环境变量指定,详见 `scripts/build.ps1`)。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build.ps1
@@ -161,16 +161,9 @@ Harness 模式补充:
 
 ## 测试状态
 
-- ✅ dsh-bridge 三项能力(POST 转发 / WS→SSE / 会话过滤)对真实 DSH 实测通过
-- ✅ Harness 后端端到端实测(`tests/host_test.exe`,本机编译 C 网络/协议代码,走真实 bridge+DSH 完成流式对话,`HOST TEST: PASS`)
 - ✅ 全量交叉编译通过,.nro 结构(魔数/段链/嵌入字体)校验通过
-- ⏳ 真机/模拟器运行验证(Ryujinx 支持 bsd socket,局域网 HTTP 可跑;nxlink 可看日志)
-
-## 二期:AI 语音输入(规划)
-
-- Switch 本体**无麦克风**,方案:USB 耳麦(UAC)经 libnx `audin` 采集 PCM
-- 本机跑 Whisper 转写服务(whisper.cpp server 或 faster-whisper,与 dsh-bridge 同机部署)
-- 应用内接口已预留:`source/stt.h`(`stt_transcribe`);采集→转写→文本自动注入输入框
+- ✅ Harness 后端聊天链路(流式正文/思考)与工作区/模型接口在真实环境验证通过
+- ⏳ 真机运行验证(Ryujinx 支持 bsd socket,局域网 HTTP 可跑;nxlink 可看日志)
 
 ## 许可
 

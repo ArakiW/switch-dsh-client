@@ -6,12 +6,11 @@
 /*
  * 后端抽象接口。
  *
- * 一期两个实现:
- *   - backend_harness.c  局域网 DeepSeek Harness(HTTP,协议见 DSH_API_SPEC.md)
+ * 两个实现:
+ *   - backend_harness.c  局域网 DeepSeek Harness(HTTP RPC + SSE)
  *   - backend_deepseek.c DeepSeek 官方 API(HTTPS + SSE)
  *
- * 二期:backend 侧预留语音转写接口(本地 Whisper HTTP 服务),通过
- * 独立的 stt_*.c 接入,不走本接口。
+ * 语音转写为独立能力(见 stt.h),不走本接口。
  */
 
 typedef enum {

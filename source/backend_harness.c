@@ -1,6 +1,6 @@
 /*
  * 后端①:局域网 DeepSeek Harness(经 dsh-bridge)。
- * 协议见 DSH_API_SPEC.md:
+ * 协议要点:
  *   - RPC:POST /api/<method>,信封 {"type":"client-request","rpcId","method","payload"}
  *   - 下行:bridge 的 SSE 端点 /api/events.sse?sessionId=x,每行是 server-request 帧
  *   - 正文:session/event -> assistant/chunk -> text-delta

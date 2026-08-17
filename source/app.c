@@ -2410,7 +2410,7 @@ static void ws_input(u64 kDown) {
     if (g_ws_idx == 1) {
         char path[512] = "";
         if (textinput_prompt("新工作区:输入已有目录绝对路径",
-                             "C:\\Users\\USER\\Documents\\Codex", 0, 0,
+                             "C:\\", 0, 0,
                              path, sizeof(path)) == 1) {
             char err[256] = {0};
             if (harness_create_workspace(&g_cfg, path, err, sizeof(err)) == 0) {

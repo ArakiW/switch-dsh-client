@@ -1,6 +1,6 @@
 /*
  * 后端②:DeepSeek 官方 API(直连,HTTPS + SSE)。
- * 要点(RESEARCH.md):
+ * 要点:
  *   - POST {base}/chat/completions,Authorization: Bearer <key>
  *   - 模型 deepseek-v4-flash / deepseek-v4-pro;thinking.type enabled|disabled
  *   - 流式每帧 "data: <json>",正文 choices[0].delta.content,

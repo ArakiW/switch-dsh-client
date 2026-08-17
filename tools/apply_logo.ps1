@@ -1,5 +1,5 @@
 # Use a custom artwork as the app logo.
-# Usage: powershell -File tools\apply_logo.ps1 [path-to-image]
+# Usage: powershell -File tools\apply_logo.ps1 <path-to-image>
 # Outputs: icon.jpg (256x256 full-bleed JPEG for hbmenu) and
 #          assets/logo.png (256x256 PNG with rounded transparent corners).
 # NOTE: keep this file pure ASCII (PS 5.1 + no-BOM UTF-8 issue).
@@ -7,7 +7,8 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
 $proj = Split-Path -Parent $PSScriptRoot
-$srcPath = if ($args.Count -gt 0) { $args[0] } else { 'C:\Users\USER\Desktop\icon-source.jpg' }
+if ($args.Count -lt 1) { throw 'usage: apply_logo.ps1 <path-to-image>' }
+$srcPath = $args[0]
 $src = [System.Drawing.Image]::FromFile($srcPath)
 
 function New-RoundRect([float]$x, [float]$y, [float]$w, [float]$h, [float]$r) {

@@ -1,18 +1,23 @@
-# Cross-compile .nro using native Windows clang + ld.lld + local devkitA64 sysroot.
+# Cross-compile .nro using native Windows clang + ld.lld + a local devkitA64 sysroot.
 # (The aarch64-none-elf-gcc in this sysroot is a Linux ELF binary and cannot run
-#  on Windows; this script follows the clang/lld route proven by F1RaceWatch.)
+#  on Windows; this script follows the proven clang/lld route.)
 # NOTE: keep this file pure ASCII - Windows PowerShell 5.1 misparses UTF-8
 # scripts without BOM when they contain non-ASCII comments.
 $ErrorActionPreference = 'Stop'
 
-# switch-tools exes (nacptool/elf2nro) need msys64 runtime DLLs
-$env:PATH = "C:\msys64\usr\bin;$env:PATH"
+# switch-tools exes (nacptool/elf2nro) need msys64 runtime DLLs.
+# Set MSYS2_BIN to your msys64\usr\bin directory, or keep the default install path.
+$msysBin = if ($env:MSYS2_BIN) { $env:MSYS2_BIN } else { 'C:\msys64\usr\bin' }
+if (Test-Path $msysBin) { $env:PATH = "$msysBin;$env:PATH" }
 
-$repo        = Split-Path -Parent $PSScriptRoot
-$fw          = 'C:\Users\USER\Documents\Codex\example\f1-race-watch-windows'
+$repo = Split-Path -Parent $PSScriptRoot
+# DSH_SWITCH_DEPS must point at the folder that contains both
+# .tools\devkita64-sysroot (a devkitA64 sysroot) and .tools\switch-tools-win.
+$fw = $env:DSH_SWITCH_DEPS
+if (-not $fw) { throw 'DSH_SWITCH_DEPS is not set; point it at the folder containing .tools\devkita64-sysroot and .tools\switch-tools-win' }
 $toolRoot    = "$fw\.tools\devkita64-sysroot\opt\devkitpro"
 $switchTools = "$fw\.tools\switch-tools-win\bin"
-$llvm        = 'C:\Program Files\LLVM\bin'
+$llvm        = if ($env:LLVM_BIN) { $env:LLVM_BIN } else { 'C:\Program Files\LLVM\bin' }
 $build       = Join-Path $repo 'build'
 $portlib     = Join-Path $toolRoot 'portlibs\switch\lib'
 
@@ -87,7 +92,7 @@ try {
 } finally { Pop-Location }
 
 # Embed assets into rodata via objcopy (this elf2nro's romfs support is
-# unreliable; F1RaceWatch proved the objcopy route on real hardware).
+# unreliable; the objcopy route has been verified on real hardware).
 $assets = @(
     @('assets\NotoSansCJKsc-Regular.otf','noto_font.o'),
     @('assets\cacert.pem','cacert.o'),
