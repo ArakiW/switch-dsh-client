@@ -63,7 +63,14 @@ GitHub Actions 见 `.github/workflows/build.yml`(devkitpro/devkitarm 镜像自�
 **一键启动桥接(任选其一):**
 
 1. **双击 `start-bridge.bat`**:自动启动桥接并显示本机局域网 IP(把 `http://<IP>:8765` 填到 Switch);关窗口即停止。
-2. **本网页侧栏底部按钮**(动态插件 `dsh-bridge launcher`):绿色 ● = 运行中,点击切换启停。插件需要你在界面上批准后生效;DSH 重启后插件消失,.bat 始终可用。
+2. **DSH 网页右下角按钮(推荐,已随本仓库发布)**:安装正式插件并重启 DSH 后出现,绿色 ● = 运行中,点击切换启停、可拖拽:
+
+   ```bash
+   dsh plugin --profile web add github:ArakiW/switch-dsh-client
+   # 重启 DSH 后生效;卸载: dsh plugin --profile web remove @dsh-external/dsh-bridge-launcher
+   ```
+
+   插件为零依赖纯 JS(仓库 `plugins/dsh-bridge-launcher/`):Host 注册同源路由 + `tapIndex` 注入按钮,桥接脚本路径自动定位仓库 `bridge/dsh-bridge.js`(可用环境变量 `DSH_BRIDGE_SCRIPT` 覆盖)。
 
 也可以手动运行:
 
