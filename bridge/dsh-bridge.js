@@ -337,17 +337,37 @@ function handleInfo(res) {
     '<!doctype html><meta charset="utf-8"><title>dsh-bridge</title>' +
     `<h2>dsh-bridge</h2><p>上游 DSH: <code>${dshUrl.href}</code></p>` +
     `<p>转写服务: <code>${whisperUrl.href}</code></p>` +
-    '<p>端点: <code>POST /api/&lt;method&gt;</code>、<code>GET /api/events.sse[?sessionId=x]</code>、<code>GET /api/events.mux</code>、<code>POST /stt</code></p>' +
+    '<p>端点: <code>POST /api/&lt;method&gt;</code>、<code>GET /api/events.sse[?sessionId=x]</code>、<code>GET /api/events.mux</code>、<code>POST /stt</code>、<code>GET /api/bridge/status</code></p>' +
     '<p>仅限可信局域网使用,勿暴露公网。</p>'
   );
+}
+
+/* JSON 状态端点(DSH web UI 按钮用) */
+function handleBridgeStatus(res) {
+  res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(JSON.stringify({ running: true, version: '1.0.0' }));
+}
+
+/* CORS 头注入:允许同源不同端口的 DSH web UI 访问 */
+function addCorsHeaders(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
 /* ---------- 服务器 ---------- */
 
 const server = http.createServer((req, res) => {
+  addCorsHeaders(res);
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
   const path = new URL(req.url, 'http://x').pathname;
   if (req.method === 'POST' && path.startsWith('/api/')) return relayPost(req, res);
   if (req.method === 'POST' && path === '/stt') return handleStt(req, res);
+  if (req.method === 'GET' && path === '/api/bridge/status') return handleBridgeStatus(res);
   if (req.method === 'GET' && path === '/api/events.sse') {
     return handleSse(req, res, new URL(req.url, 'http://x').searchParams.get('sessionId'));
   }
