@@ -94,6 +94,12 @@ static int g_ws_idx = 0;
 static char g_ws_err[256];
 static int g_ws_confirm = -1; /* 删除确认:-1 = 无,>=0 = 该行待确认 */
 
+/* 工作区异步加载 */
+static harness_workspace_t *g_ws_tmp_wss = NULL;
+static size_t g_ws_tmp_wss_n = 0;
+static volatile int g_ws_loading = 0;
+static volatile int g_ws_ready = 0;
+
 /* 工作区内会话 */
 static harness_session_t *g_wss_sessions = NULL;
 static size_t g_wss_sessions_n = 0;
@@ -2424,15 +2430,41 @@ static void enter_workspaces(int from_startup) {
     g_dirty = 1;
 }
 
-static void ws_load(void) {
-    render_workspaces();
-    g_dirty = 0;
+static int ws_thread_fn(void *arg) {
+    (void)arg;
     char err[256] = {0};
-    if (harness_list_workspaces(&g_cfg, &g_wss, &g_wss_n, err, sizeof(err)) != 0) {
-        snprintf(g_ws_err, sizeof(g_ws_err), "%s", err[0] ? err : "加载失败");
-    }
+    harness_workspace_t *w = NULL;
+    size_t wn = 0;
+    harness_list_workspaces(&g_cfg, &w, &wn, err, sizeof(err));
+    g_ws_tmp_wss = w;
+    g_ws_tmp_wss_n = wn;
+    snprintf(g_ws_err, sizeof(g_ws_err), "%s", err);
+    g_ws_ready = 1;
+    g_ws_loading = 0;
+    return 0;
+}
+
+static void ws_apply_ready(void) {
+    if (!g_ws_loading || !g_ws_ready) return;
+    harness_workspaces_free(g_wss, g_wss_n);
+    g_wss = g_ws_tmp_wss;
+    g_wss_n = g_ws_tmp_wss_n;
+    g_ws_tmp_wss = NULL;
+    g_ws_tmp_wss_n = 0;
     g_ws_loaded = 1;
+    g_ws_loading = 0;
     g_dirty = 1;
+}
+
+/* 非阻塞:启动后台线程加载,不卡主线程 */
+static void ws_load(void) {
+    if (g_ws_loading) return;
+    g_ws_err[0] = '\0';
+    g_ws_loading = 1;
+    g_ws_ready = 0;
+    SDL_Thread *th = SDL_CreateThread(ws_thread_fn, "ws_load", NULL);
+    if (th) SDL_DetachThread(th);
+    else { g_ws_loading = 0; g_ws_loaded = 1; g_dirty = 1; }
 }
 
 static void ws_input(u64 kDown) {
@@ -3627,6 +3659,7 @@ int app_frame(void) {
     drain_queue();
     tts_poll(); /* 每帧:取合成结果、向音频设备喂数据 */
     stt_poll(); /* 每帧:录音期间收集已释放的麦克风缓冲 */
+    ws_apply_ready(); /* 每帧:取后台工作区加载结果 */
 
     if (g_dirty) {
         if (g_screen == SCREEN_CHOICE) render_choice();
