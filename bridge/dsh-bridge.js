@@ -12,11 +12,13 @@
  *   POST /api/<method>                    -> JSON 信封原样转发到 DSH
  *   GET  /api/events.mux                  -> WebSocket 原始双向转发(调试用)
  *   GET  /api/events.sse[?sessionId=x]    -> WS 帧 -> SSE(data: <json>),可选按会话过滤
+ *   POST /stt                             -> WAV 原样转发到 whisper 转写服务
  *   GET  /                                -> 状态页
  *
  * 用法:
  *   node dsh-bridge.js [--dsh http://127.0.0.1:3080] [--host 0.0.0.0] [--port 8765]
- *   环境变量:DSH_URL / BRIDGE_HOST / BRIDGE_PORT(命令行参数优先)
+ *                      [--whisper http://127.0.0.1:9000]
+ *   环境变量:DSH_URL / BRIDGE_HOST / BRIDGE_PORT / WHISPER_URL(命令行参数优先)
  *
  * 零依赖(node:http/node:crypto)。本进程不内置鉴权,与 DSH 的信任模型一致,
  * 只应在可信局域网内运行;不要暴露到公网(DSH API 可执行远程代码)。
@@ -39,6 +41,8 @@ function argVal(name) {
 const dshUrl = new URL(argVal('--dsh') || process.env.DSH_URL || 'http://127.0.0.1:3080');
 const listenHost = argVal('--host') || process.env.BRIDGE_HOST || '0.0.0.0';
 const listenPort = parseInt(argVal('--port') || process.env.BRIDGE_PORT || '8765', 10);
+/* 语音转写(whisper)服务地址:桥接把 POST /stt 的 WAV 原样转发到这里。 */
+const whisperUrl = new URL(argVal('--whisper') || process.env.WHISPER_URL || 'http://127.0.0.1:9000');
 
 if (dshUrl.protocol !== 'http:') {
   console.error(`dsh-bridge: 仅支持 http:// 上游(DSH 本身无 TLS),收到: ${dshUrl.protocol}`);
@@ -290,12 +294,50 @@ function handleWsRelay(req, socket, head) {
   });
 }
 
+/* 语音转写转发:把 Switch 发来的 WAV 原样 POST 到 whisper 服务,回传其 JSON。 */
+function handleStt(req, res) {
+  const chunks = [];
+  req.on('data', (c) => chunks.push(c));
+  req.on('error', () => res.destroy());
+  req.on('end', () => {
+    const body = Buffer.concat(chunks);
+    if (body.length === 0) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ text: '', error: 'empty audio' }));
+      return;
+    }
+    const up = http.request({
+      hostname: whisperUrl.hostname,
+      port: whisperUrl.port ? parseInt(whisperUrl.port, 10) : 80,
+      path: whisperUrl.pathname + whisperUrl.search,
+      method: 'POST',
+      headers: {
+        'content-type': 'audio/wav',
+        'content-length': body.length,
+      },
+    }, (ures) => {
+      const rc = [];
+      ures.on('data', (c) => rc.push(c));
+      ures.on('end', () => {
+        res.writeHead(ures.statusCode || 200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        res.end(Buffer.concat(rc));
+      });
+    });
+    up.on('error', (e) => {
+      res.writeHead(502, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ text: '', error: `whisper 不可达: ${e.message}` }));
+    });
+    up.end(body);
+  });
+}
+
 function handleInfo(res) {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
   res.end(
     '<!doctype html><meta charset="utf-8"><title>dsh-bridge</title>' +
     `<h2>dsh-bridge</h2><p>上游 DSH: <code>${dshUrl.href}</code></p>` +
-    '<p>端点: <code>POST /api/&lt;method&gt;</code>、<code>GET /api/events.sse[?sessionId=x]</code>、<code>GET /api/events.mux</code></p>' +
+    `<p>转写服务: <code>${whisperUrl.href}</code></p>` +
+    '<p>端点: <code>POST /api/&lt;method&gt;</code>、<code>GET /api/events.sse[?sessionId=x]</code>、<code>GET /api/events.mux</code>、<code>POST /stt</code></p>' +
     '<p>仅限可信局域网使用,勿暴露公网。</p>'
   );
 }
@@ -305,6 +347,7 @@ function handleInfo(res) {
 const server = http.createServer((req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   if (req.method === 'POST' && path.startsWith('/api/')) return relayPost(req, res);
+  if (req.method === 'POST' && path === '/stt') return handleStt(req, res);
   if (req.method === 'GET' && path === '/api/events.sse') {
     return handleSse(req, res, new URL(req.url, 'http://x').searchParams.get('sessionId'));
   }
@@ -327,6 +370,8 @@ server.on('error', (e) => {
 
 server.listen(listenPort, listenHost, () => {
   console.log(`dsh-bridge 已启动: http://${listenHost}:${listenPort}  ->  ${dshUrl.href}`);
+  console.log(`语音转写转发: POST /stt  ->  ${whisperUrl.href}`);
   console.log('Switch 端把 config.json 的 harness_base_url 配成: http://<本机局域网IP>:' + listenPort);
+  console.log('语音输入则把 stt_url 配成: http://<本机局域网IP>:' + listenPort + '/stt');
   console.log('仅限可信局域网,勿暴露公网。');
 });
