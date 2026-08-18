@@ -951,9 +951,12 @@ static void sb_build_rows(void) {
         }
         free(matched);
     }
-    g_sb_rows[g_sb_rows_n].kind = 2;
-    g_sb_rows[g_sb_rows_n].idx = 0;
-    g_sb_rows_n++;
+    /* 工作区管理仅在 Harness 后端时显示(DeepSeek 直连无此功能) */
+    if (strcmp(g_cfg.backend, "harness") == 0) {
+        g_sb_rows[g_sb_rows_n].kind = 2;
+        g_sb_rows[g_sb_rows_n].idx = 0;
+        g_sb_rows_n++;
+    }
     g_sb_rows[g_sb_rows_n].kind = 3;
     g_sb_rows[g_sb_rows_n].idx = 0;
     g_sb_rows_n++;
@@ -1136,6 +1139,11 @@ static void ensure_sidebar_tex(void) {
 
     if (g_sb_err[0])
         draw_trunc(g_font_hint, g_sb_err, COL_RED, 16, WIN_H - 52, SB_W - 32);
+
+    if (strcmp(g_cfg.backend, "deepseek") == 0)
+        draw_line(g_font_hint, COL_TEXT3, 16, WIN_H - 52,
+                  "会话/工作区管理需 Harness 桥接",
+                  0, strlen("会话/工作区管理需 Harness 桥接"));
 
     draw_line(g_font_hint, COL_TEXT3, 16, WIN_H - 26, "X 焦点切换  Y 设置  R 切后端",
               0, strlen("X 焦点切换  Y 设置  R 切后端"));
