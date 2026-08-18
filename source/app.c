@@ -7,6 +7,7 @@
 #include <SDL_ttf.h>
 #include <SDL2/SDL2_gfxPrimitives.h>
 #include <SDL2/SDL_image.h>
+#include <sys/stat.h>
 #include <switch.h>
 
 #include "app.h"
@@ -302,6 +303,23 @@ static void history_save(const char *path, const msg_t *msgs, int n) {
     free(j);
 }
 
+/* 导出当前对话到 SD 卡 */
+static char g_export_msg[256];
+
+static void export_conversation(void) {
+    mkdir("sdmc:/switch/switch-dsh-client", 0777);
+    time_t t = time(NULL);
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    char path[256];
+    snprintf(path, sizeof(path),
+             "sdmc:/switch/switch-dsh-client/export_%04d%02d%02d_%02d%02d%02d.json",
+             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+             tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+    history_save(path, g_msgs, g_nmsgs);
+    snprintf(g_export_msg, sizeof(g_export_msg), "已导出: %s", path);
+}
+
 static void history_load(const char *path, msg_t *dst, int *dn) {
     buf_clear(dst, dn);
     FILE *f = fopen(path, "rb");
@@ -409,6 +427,9 @@ static void cfg_clone(backend_config_t *dst, const backend_config_t *src) {
     dst->deepseek_thinking = strdup(src->deepseek_thinking ? src->deepseek_thinking : "");
     dst->system_prompt     = strdup(src->system_prompt ? src->system_prompt : "");
     dst->stt_url           = strdup(src->stt_url ? src->stt_url : "");
+    dst->tts_rate          = src->tts_rate;
+    dst->tts_volume        = src->tts_volume;
+    dst->tts_pitch         = src->tts_pitch;
 }
 
 static int worker_fn(void *arg) {
@@ -561,9 +582,8 @@ static void drain_queue(void) {
             g_stream_think = 0;
             g_dirty = 1;
             save_current_history();
-            /* 助手回复完成:Harness 后端 + 语音开启时自动朗读 */
-            if (g_voice_enabled && strcmp(g_cfg.backend, "harness") == 0 &&
-                tts_available() && g_nmsgs > 0 &&
+            /* 助手回复完成:语音开启 + TTS 可用时自动朗读(本地合成,不限后端) */
+            if (g_voice_enabled && tts_available() && g_nmsgs > 0 &&
                 g_msgs[g_nmsgs - 1].text[0] != '\0') {
                 tts_speak(g_msgs[g_nmsgs - 1].text);
             }
@@ -1339,7 +1359,9 @@ static void ensure_footer_tex(void) {
     int be = strcmp(g_cfg.backend, "harness") == 0 ? 1 : 0;
     int streaming = (g_nmsgs > 0 && g_msgs[g_nmsgs - 1].role == ROLE_ASSISTANT &&
                      !g_msgs[g_nmsgs - 1].done) ? 1 : 0;
-    int rev = busy * 1000 + th * 100 + be * 10 + streaming + (g_focus ? 100000 : 0);
+    int tts_on = tts_playing() ? 1 : 0;
+    int stt_on = stt_recording() ? 1 : 0;
+    int rev = busy * 10000 + th * 1000 + be * 100 + streaming * 10 + tts_on * 3 + stt_on + (g_focus ? 1000000 : 0);
     if (rev == g_ftr_rev && g_ftr_tex) return;
     if (g_ftr_tex) SDL_DestroyTexture(g_ftr_tex);
     g_ftr_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA8888,
@@ -1355,6 +1377,10 @@ static void ensure_footer_tex(void) {
     const char *hint;
     if (g_focus)
         hint = "侧栏模式:方向键选择  A 打开  B 返回对话  R 切后端  Y 设置";
+    else if (stt_on)
+        hint = "语音录制中…松开 ZR 发送    + 退出";
+    else if (tts_on)
+        hint = "朗读中…(- 停止)    + 退出";
     else if (busy)
         hint = th ? "思考中…(B 停止)    + 退出" : "回复中…(B 停止)    + 退出";
     else
@@ -1595,7 +1621,7 @@ static char g_key_menu_msg[256];
 
 /* ---------- 设置界面 ---------- */
 
-#define SET_COUNT 9
+#define SET_COUNT 13
 
 static const char *set_label(int i) {
     switch (i) {
@@ -1606,8 +1632,12 @@ static const char *set_label(int i) {
         case 4: return "模型";
         case 5: return "思考模式";
         case 6: return "系统提示词";
-        case 7: return "语音朗读(仅 Harness)";
+        case 7: return "语音朗读";
         case 8: return "STT 服务地址";
+        case 9: return "语音语速";
+        case 10: return "语音音量";
+        case 11: return "语音音调";
+        case 12: return "导出对话到 SD 卡";
         default: return "";
     }
 }
@@ -1641,6 +1671,10 @@ static void set_value(int i, char *out, size_t outsz) {
             snprintf(out, outsz, "%s",
                      (g_cfg.stt_url && g_cfg.stt_url[0]) ? g_cfg.stt_url : "(空)");
             break;
+        case 9:  snprintf(out, outsz, "%d", g_cfg.tts_rate);   break;
+        case 10: snprintf(out, outsz, "%d", g_cfg.tts_volume); break;
+        case 11: snprintf(out, outsz, "%d", g_cfg.tts_pitch);  break;
+        case 12: snprintf(out, outsz, "%s", "(按 A 导出当前对话)"); break;
         default: out[0] = '\0';
     }
 }
@@ -1840,6 +1874,33 @@ static void settings_input(u64 kDown) {
             case 8:
                 set_edit_field(&g_cfg.stt_url,
                                "STT 服务地址(如 http://192.168.1.10:9000)", 0, 0);
+                break;
+            case 9: { /* 语速: 循环选择预设值 */
+                static const int rates[] = {120, 150, 175, 200, 250, 300};
+                int n = (int)(sizeof(rates)/sizeof(rates[0]));
+                for (int r = 0; r < n; r++)
+                    if (rates[r] >= g_cfg.tts_rate) { g_cfg.tts_rate = rates[(r+1)%n]; break; }
+                tts_set_params(g_cfg.tts_rate, g_cfg.tts_volume, g_cfg.tts_pitch);
+                break;
+            }
+            case 10: { /* 音量 */
+                static const int vols[] = {30, 60, 100, 150, 200};
+                int n = (int)(sizeof(vols)/sizeof(vols[0]));
+                for (int r = 0; r < n; r++)
+                    if (vols[r] >= g_cfg.tts_volume) { g_cfg.tts_volume = vols[(r+1)%n]; break; }
+                tts_set_params(g_cfg.tts_rate, g_cfg.tts_volume, g_cfg.tts_pitch);
+                break;
+            }
+            case 11: { /* 音调 */
+                static const int pitches[] = {25, 40, 50, 65, 80};
+                int n = (int)(sizeof(pitches)/sizeof(pitches[0]));
+                for (int r = 0; r < n; r++)
+                    if (pitches[r] >= g_cfg.tts_pitch) { g_cfg.tts_pitch = pitches[(r+1)%n]; break; }
+                tts_set_params(g_cfg.tts_rate, g_cfg.tts_volume, g_cfg.tts_pitch);
+                break;
+            }
+            case 12: /* 导出对话到 SD */
+                export_conversation();
                 break;
         }
         g_dirty = 1;
@@ -3371,6 +3432,8 @@ int app_init(void) {
     /* 本地离线 TTS(espeak-ng)。失败(无音频/缺数据)时静默禁用,不影响聊天。 */
     if (tts_init() != 0)
         printf("app: TTS 不可用(语音朗读禁用)\n");
+    else
+        tts_set_params(g_cfg.tts_rate, g_cfg.tts_volume, g_cfg.tts_pitch);
 
     /* 语音输入 STT(audin 麦克风)。失败时静默禁用。 */
     if (stt_init() != 0)
@@ -3519,10 +3582,9 @@ int app_frame(void) {
                 stt_transcribe_async();
             }
         }
-        /* - :朗读最后一条助手消息(仅 Harness + 语音开启) */
+        /* - :朗读最后一条助手消息(语音开启 + TTS 可用,不限后端) */
         if ((kDown & HidNpadButton_Minus) && !g_worker_busy) {
-            if (g_voice_enabled && strcmp(g_cfg.backend, "harness") == 0 &&
-                tts_available()) {
+            if (g_voice_enabled && tts_available()) {
                 for (int i = g_nmsgs - 1; i >= 0; i--) {
                     if (g_msgs[i].role == ROLE_ASSISTANT &&
                         g_msgs[i].text && g_msgs[i].text[0]) {

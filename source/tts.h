@@ -13,6 +13,7 @@ int  tts_available(void);         /* 初始化是否成功 */
 int  tts_speak(const char *utf8); /* 异步朗读一段 UTF-8 文本;0 已提交,-1 失败/忙 */
 int  tts_playing(void);           /* 是否正在播放(或在途合成) */
 void tts_stop(void);              /* 停止播放并丢弃待播/在途结果 */
+void tts_set_params(int rate, int volume, int pitch); /* 设置语速/音量/音调 */
 void tts_poll(void);              /* 每帧调用:取合成结果、向音频设备喂数据 */
 void tts_quit(void);              /* 释放资源 */
 

@@ -84,6 +84,9 @@ void config_apply_defaults(backend_config_t *cfg) {
     cfg->deepseek_thinking = dupstr("disabled");
     cfg->system_prompt     = dupstr("");
     cfg->stt_url           = dupstr("");
+    cfg->tts_rate          = 175;
+    cfg->tts_volume        = 100;
+    cfg->tts_pitch         = 50;
 }
 
 int config_load(backend_config_t *cfg) {
@@ -113,6 +116,15 @@ int config_load(backend_config_t *cfg) {
     if ((s = json_str(root, "deepseek_thinking"))) { free(cfg->deepseek_thinking); cfg->deepseek_thinking = dupstr(s); }
     if ((s = json_str(root, "system_prompt")))     { free(cfg->system_prompt);     cfg->system_prompt     = dupstr(s); }
     if ((s = json_str(root, "stt_url")))           { free(cfg->stt_url);           cfg->stt_url           = dupstr(s); }
+    {
+        cJSON *num;
+        num = cJSON_GetObjectItemCaseSensitive(root, "tts_rate");
+        if (cJSON_IsNumber(num)) cfg->tts_rate = num->valueint;
+        num = cJSON_GetObjectItemCaseSensitive(root, "tts_volume");
+        if (cJSON_IsNumber(num)) cfg->tts_volume = num->valueint;
+        num = cJSON_GetObjectItemCaseSensitive(root, "tts_pitch");
+        if (cJSON_IsNumber(num)) cfg->tts_pitch = num->valueint;
+    }
 
     cJSON_Delete(root);
 
@@ -138,6 +150,9 @@ int config_save(const backend_config_t *cfg) {
     cJSON_AddStringToObject(root, "deepseek_thinking", cfg->deepseek_thinking);
     cJSON_AddStringToObject(root, "system_prompt",    cfg->system_prompt);
     cJSON_AddStringToObject(root, "stt_url",          cfg->stt_url);
+    cJSON_AddNumberToObject(root, "tts_rate",          cfg->tts_rate);
+    cJSON_AddNumberToObject(root, "tts_volume",        cfg->tts_volume);
+    cJSON_AddNumberToObject(root, "tts_pitch",         cfg->tts_pitch);
 
     char *pretty = cJSON_Print(root);
     cJSON_Delete(root);

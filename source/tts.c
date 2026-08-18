@@ -350,6 +350,7 @@ int tts_init(void) {
     if (espeak_SetVoiceByName("cmn") != EE_OK)
         espeak_SetVoiceByName("zh"); /* 兜底 */
 
+    /* 默认参数,之后由 tts_set_params 更新 */
     espeak_SetParameter(espeakRATE, 175, 0);
     espeak_SetParameter(espeakVOLUME, 100, 0);
     espeak_SetParameter(espeakPITCH, 50, 0);
@@ -357,6 +358,17 @@ int tts_init(void) {
     g_tts_ok = 1;
     printf("tts: ready (rate=%d)\n", rate);
     return 0;
+}
+
+void tts_set_params(int rate, int volume, int pitch) {
+    if (!g_tts_ok) return;
+    if (rate  < 80)  rate  = 80;  if (rate  > 450) rate  = 450;
+    if (volume < 0)  volume = 0;  if (volume > 200) volume = 200;
+    if (pitch  < 0)  pitch  = 0;  if (pitch  > 100) pitch  = 100;
+    espeak_SetParameter(espeakRATE, rate, 0);
+    espeak_SetParameter(espeakVOLUME, volume, 0);
+    espeak_SetParameter(espeakPITCH, pitch, 0);
+    printf("tts: params rate=%d vol=%d pitch=%d\n", rate, volume, pitch);
 }
 
 void tts_quit(void) {

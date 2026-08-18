@@ -33,6 +33,9 @@ typedef struct {
     char *deepseek_thinking;  /* "enabled" | "disabled"(默认) */
     char *system_prompt;      /* 可为 NULL 或空串 */
     char *stt_url;            /* STT 转写服务地址(空串=禁用语音输入) */
+    int   tts_rate;           /* TTS 语速,words-per-minute,默认 175 */
+    int   tts_volume;         /* TTS 音量,0-200,默认 100 */
+    int   tts_pitch;          /* TTS 音调,0-100,默认 50 */
 } backend_config_t;
 
 /*
