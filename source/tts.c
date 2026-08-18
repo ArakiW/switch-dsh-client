@@ -9,8 +9,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <SDL.h>
+#include <switch.h>
 
 #include "tts.h"
 #include "espeak-ng/speak_lib.h"
@@ -244,6 +246,91 @@ int tts_speak(const char *utf8) {
 
 /* ---------- 生命周期 ---------- */
 
+/* espeak-ng 数据(Windows 构建经 objcopy 嵌入;devkitPro 走 romfs) */
+__attribute__((weak)) extern const unsigned char _binary_espeak_ng_data_bin_start[];
+__attribute__((weak)) extern const unsigned char _binary_espeak_ng_data_bin_end[];
+
+#define ESPEAK_SD_DIR "sdmc:/switch/switch-dsh-client/espeak-ng-data"
+#define ESPEAK_SD_OK  "sdmc:/switch/switch-dsh-client/.espeak_data_ok"
+
+static u32 rd_u32(const u8 *p) {
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
+/* 逐级创建目录 */
+static void mkdir_p(char *path) {
+    for (char *p = path + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(path, 0777);
+            *p = '/';
+        }
+    }
+    mkdir(path, 0777);
+}
+
+/* 把内嵌的 espeak-ng-data blob 解包到 SD 卡;0 成功 */
+static int extract_espeak_data(void) {
+    const u8 *p = _binary_espeak_ng_data_bin_start;
+    if (p == NULL) return -1;
+    size_t total = (size_t)(_binary_espeak_ng_data_bin_end - p);
+    if (total < 8 || rd_u32(p) != 0x4B505345) return -1; /* "ESPK" */
+    p += 4;
+    u32 count = rd_u32(p); p += 4;
+
+    mkdir(ESPEAK_SD_DIR, 0777);
+    for (u32 i = 0; i < count; i++) {
+        if ((size_t)(p - _binary_espeak_ng_data_bin_start) + 8 > total) return -1;
+        u32 name_len = rd_u32(p); p += 4;
+        if (name_len == 0 || name_len > 240) return -1;
+        char name[256];
+        memcpy(name, p, name_len);
+        name[name_len] = '\0';
+        p += name_len;
+        u32 data_len = rd_u32(p); p += 4;
+        if ((size_t)(p - _binary_espeak_ng_data_bin_start) + data_len > total) return -1;
+
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", ESPEAK_SD_DIR, name);
+        mkdir_p(path); /* 确保父目录存在 */
+
+        FILE *f = fopen(path, "wb");
+        if (!f) return -1;
+        fwrite(p, 1, data_len, f);
+        fclose(f);
+        p += data_len;
+    }
+
+    /* 写完成标记,避免每次启动重复解包 */
+    FILE *ok = fopen(ESPEAK_SD_OK, "wb");
+    if (ok) fclose(ok);
+    return 0;
+}
+
+/* 找到 espeak-ng 数据目录:优先 romfs(devkitPro 构建),否则解包到 SD */
+static int ensure_espeak_data(void) {
+    const char *path = "romfs:/espeak-ng-data";
+
+    /* romfs 可用则直接用(devkitPro 构建) */
+    FILE *probe = fopen("romfs:/espeak-ng-data/phondata", "rb");
+    if (!probe) {
+        /* Windows objcopy 构建:解包到 SD 再初始化 */
+        FILE *ok = fopen(ESPEAK_SD_OK, "rb");
+        if (ok) {
+            fclose(ok); /* 已解包过 */
+        } else if (extract_espeak_data() != 0) {
+            printf("tts: extract espeak data failed\n");
+            return -1;
+        }
+        path = ESPEAK_SD_DIR;
+    } else {
+        fclose(probe);
+    }
+
+    return espeak_Initialize(AUDIO_OUTPUT_RETRIEVAL, 0, path,
+                             espeakINITIALIZE_DONT_EXIT);
+}
+
 int tts_init(void) {
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
         printf("tts: SDL audio init failed: %s\n", SDL_GetError());
@@ -252,9 +339,7 @@ int tts_init(void) {
     g_tts_mtx = SDL_CreateMutex();
     if (!g_tts_mtx) return -1;
 
-    int rate = espeak_Initialize(AUDIO_OUTPUT_RETRIEVAL, 0,
-                                 "romfs:/espeak-ng-data",
-                                 espeakINITIALIZE_DONT_EXIT);
+    int rate = ensure_espeak_data();
     if (rate <= 0) {
         printf("tts: espeak_Initialize failed (rate=%d)\n", rate);
         return -1;

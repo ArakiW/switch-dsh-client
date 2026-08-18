@@ -117,7 +117,8 @@ try {
 $assets = @(
     @('assets\NotoSansCJKsc-Regular.otf','noto_font.o'),
     @('assets\cacert.pem','cacert.o'),
-    @('assets\logo.png','logo.o')
+    @('assets\logo.png','logo.o'),
+    @('assets\espeak-ng-data.bin','espeak_data.o')
 )
 foreach ($entry in $assets) {
     $src = Join-Path $repo $entry[0]
@@ -169,7 +170,7 @@ $nacp = Join-Path $build 'switch-dsh-client.nacp'
 $nro  = Join-Path $repo 'switch-dsh-client.nro'
 & (Join-Path $switchTools 'nacptool.exe') --create 'DSH Switch Client' 'switch-dsh-client' '0.1.0' $nacp
 if ($LASTEXITCODE -ne 0) { throw 'nacp failed' }
-& (Join-Path $switchTools 'elf2nro.exe') $elf $nro "--nacp=$nacp" "--icon=$(Join-Path $repo 'icon.jpg')" "--romfsdir=$(Join-Path $repo 'romfs')"
+& (Join-Path $switchTools 'elf2nro.exe') $elf $nro "--nacp=$nacp" "--icon=$(Join-Path $repo 'icon.jpg')"
 if ($LASTEXITCODE -ne 0) { throw 'nro failed' }
 
 Get-Item $nro | Select-Object FullName, Length
