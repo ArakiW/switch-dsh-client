@@ -83,6 +83,12 @@
   * 按 `-`（减号键）可重新朗读最后一条回复
   * 声音通过 3.5mm 耳机输出，可在设置中开关
 
+* **语音输入（STT）**
+
+  * 通过 3.5mm 头戴麦克风采集，送外部转写服务
+  * 按住 `ZR` 录音，松开后自动转写并作为消息发送
+  * 仅 Harness 后端时可用，转写服务地址在设置中配置
+
 ---
 
 ## 📸 截图
@@ -118,18 +124,25 @@ GitHub Actions 会自动构建 `.nro` 成品；创建 Git tag 时会自动生成
 1. 接收 Switch 客户端请求
 2. 转发 Harness HTTP RPC
 3. 将 Harness WebSocket 数据转换为 SSE
-4. 在局域网端口 `8765` 提供服务
+4. 将语音输入的 WAV 转发到 whisper 转写服务（`POST /stt`）
+5. 在局域网端口 `8765` 提供服务
 
-例如，运行桥接服务的设备地址为：
+语音输入（STT）需要本机运行一个接受 `audio/wav` POST、返回 `{"text": ...}` 的转写服务（如 whisper.cpp / faster-whisper），并在启动桥接时用 `--whisper` 或环境变量 `WHISPER_URL` 指向它：
 
 ```text
-192.168.1.10
+node dsh-bridge.js --whisper http://127.0.0.1:9000
 ```
 
 则 Switch 端连接目标为：
 
 ```text
 http://192.168.1.10:8765
+```
+
+语音输入则在设置里把 `stt_url` 配成：
+
+```text
+http://192.168.1.10:8765/stt
 ```
 
 Switch 与运行 `dsh-bridge` 的设备需要能够通过局域网互相访问。
@@ -173,6 +186,7 @@ API Key 仅作为本地配置持久化在用户自己的 SD 卡中。
 | 模型切换 | 在 `deepseek-v4-pro` 与 `deepseek-v4-flash` 之间切换 |
 | 思考模式 | 在 `enabled` 与 `disabled` 之间切换                  |
 | 朗读回复 | 按 `-`（减号键）朗读最后一条助手回复（仅 Harness 后端）        |
+| 语音输入 | 按住 `ZR` 录音，松开转写并发送（仅 Harness 后端，需配 STT 地址） |
 
 ---
 
@@ -193,6 +207,7 @@ API Key 仅作为本地配置持久化在用户自己的 SD 卡中。
 | `model`             | 模型                                | `deepseek-v4-pro`                  |
 | `deepseek_thinking` | 思考模式                              | `enabled` / `disabled`             |
 | `system_prompt`     | 系统提示词（可选）                         |                                    |
+| `stt_url`           | STT 转写服务地址（空串 = 禁用语音输入）          | `http://192.168.1.10:8765/stt`     |
 
 `model` 与 `deepseek_thinking` 也可以直接在聊天页面中切换。
 
