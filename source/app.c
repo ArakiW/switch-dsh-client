@@ -1118,7 +1118,7 @@ static void ensure_sidebar_tex(void) {
     for (int i = 0; i < g_sb_rows_n; i++) {
         sb_row_t *r = &g_sb_rows[i];
         if (r->kind == 4) {
-            if (y + 30 > WIN_H - 100) break;
+            if (y + 30 > WIN_H - FOOTER_H - 30) break;
             r->fy = y;
             r->fh = 30;
             g_sb_focus_of[i] = -1;
@@ -1128,7 +1128,7 @@ static void ensure_sidebar_tex(void) {
             y += 30;
             continue;
         }
-        if (y + 48 > WIN_H - 100) break;
+        if (y + 48 > WIN_H - FOOTER_H - 30) break;
         r->fy = y;
         r->fh = 48;
         g_sb_focus_of[i] = fi;
@@ -1164,7 +1164,7 @@ static void ensure_sidebar_tex(void) {
     g_sb_focus_n = fi;
 
     if (g_sb_err[0])
-        draw_trunc(g_font_hint, g_sb_err, COL_RED, 16, WIN_H - 52, SB_W - 32);
+        draw_trunc(g_font_hint, g_sb_err, COL_RED, 16, WIN_H - FOOTER_H - 40, SB_W - 32);
 
     if (strcmp(g_cfg.backend, "deepseek") == 0)
         draw_line(g_font_hint, COL_TEXT3, 16, WIN_H - FOOTER_H - 24,
@@ -1310,6 +1310,7 @@ static void render_msg_texture(msg_t *m, int x0, int maxw, int lineh) {
     int mw = 0;
     int h = render_msg_flow(x0, maxw, lineh, 0, m, 1, &mw);
     if (h <= 0) h = 12;
+    h += 6; /* 底部留白,防止消息间文字紧贴 */
     m->tex_h = h;
     m->tex_w = maxw;
     m->dirty = 0;
