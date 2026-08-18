@@ -1161,11 +1161,11 @@ static void ensure_sidebar_tex(void) {
         draw_trunc(g_font_hint, g_sb_err, COL_RED, 16, WIN_H - 52, SB_W - 32);
 
     if (strcmp(g_cfg.backend, "deepseek") == 0)
-        draw_line(g_font_hint, COL_TEXT3, 16, WIN_H - 52,
+        draw_line(g_font_hint, COL_TEXT3, 16, WIN_H - FOOTER_H - 24,
                   "会话/工作区管理需 Harness 桥接",
                   0, strlen("会话/工作区管理需 Harness 桥接"));
 
-    draw_line(g_font_hint, COL_TEXT3, 16, WIN_H - 26, "X 焦点切换  Y 设置  R 切后端",
+    draw_line(g_font_hint, COL_TEXT3, 16, WIN_H - FOOTER_H - 4, "X 焦点切换  Y 设置  R 切后端",
               0, strlen("X 焦点切换  Y 设置  R 切后端"));
     SDL_SetRenderTarget(g_ren, NULL);
     g_sb_rev = rev;
@@ -1619,8 +1619,8 @@ static int g_key_menu_open = 0;
 static int g_key_menu_idx = 0;
 static char g_key_menu_msg[256];
 
-/* ---------- 设置界面 ---------- */
-
+/* 设置界面 ---------- */
+static int g_set_scroll = 0; /* 设置页滚动偏移 */
 #define SET_COUNT 13
 
 static const char *set_label(int i) {
@@ -1929,8 +1929,18 @@ static void render_settings(void) {
     }
 
     const int row_h = 76;
+    /* 自动滚动:确保选中项始终可见 */
+    {
+        int vis_h = WIN_H - HEADER_H - 80;
+        int top_y = g_set_idx * row_h + HEADER_H + 20;
+        if (top_y < g_set_scroll + 10) g_set_scroll = top_y - 10;
+        int bot_y = (g_set_idx + 1) * row_h + HEADER_H + 20;
+        if (bot_y > g_set_scroll + vis_h) g_set_scroll = bot_y - vis_h;
+        if (g_set_scroll < 0) g_set_scroll = 0;
+    }
     for (int i = 0; i < SET_COUNT; i++) {
-        int y = HEADER_H + 20 + i * row_h;
+        int y = HEADER_H + 20 + i * row_h - g_set_scroll;
+        if (y + row_h < HEADER_H || y > WIN_H) continue; /* 跳出屏幕的行 */
 
         /* 选中高亮(layer-2 圆角) */
         if (i == g_set_idx) {
