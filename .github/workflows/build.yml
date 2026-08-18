@@ -56,4 +56,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: switch-dsh-client.nro
-          generate_release_notes: true
+          body: "Nintendo Switch 自制程序:DeepSeek AI 聊天客户端。含本地离线语音朗读(TTS)与语音输入(STT,需桥接 + whisper 服务)。将 .nro 放入 SD 卡 homebrew 目录运行。"
