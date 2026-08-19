@@ -1276,24 +1276,57 @@ static void sb_tap(int ty) {
     }
 }
 
-static void chat_resume_last(void) {
-    if (strcmp(g_cfg.backend, "harness") != 0) return;
+/* chat_resume_last 异步化:后台线程拉历史,主线程收口 */
+static chat_message_t *g_resume_tmp_msgs = NULL;
+static size_t g_resume_tmp_n = 0;
+static long long g_resume_tmp_first = -1;
+static volatile int g_resume_loading = 0;
+static volatile int g_resume_ready = 0;
+
+static int chat_resume_thread_fn(void *arg) {
+    (void)arg;
     const char *sid = harness_current_session();
-    if (!sid || !sid[0]) return;
+    if (!sid || !sid[0]) { g_resume_ready = 1; return 0; }
     char err[256] = {0};
     chat_message_t *msgs = NULL;
     size_t n = 0;
     long long first = -1;
     if (harness_fetch_history_ex(&g_cfg, 0, &msgs, &n, &first,
                                  err, sizeof(err)) == 0 && n > 0) {
-        clear_msgs();
-        for (size_t i = 0; i < n; i++)
-            add_msg(msgs[i].role, msgs[i].content ? msgs[i].content : "", 1);
-        for (size_t i = 0; i < n; i++) free(msgs[i].content);
-        free(msgs);
-        g_first_seq = first;
-        g_dirty = 1;
+        g_resume_tmp_msgs = msgs;
+        g_resume_tmp_n = n;
+        g_resume_tmp_first = first;
     }
+    g_resume_ready = 1;
+    return 0;
+}
+
+static void chat_resume_apply(void) {
+    if (!g_resume_loading || !g_resume_ready) return;
+    if (g_resume_tmp_msgs && g_resume_tmp_n > 0) {
+        clear_msgs();
+        for (size_t i = 0; i < g_resume_tmp_n; i++)
+            add_msg(g_resume_tmp_msgs[i].role,
+                    g_resume_tmp_msgs[i].content ? g_resume_tmp_msgs[i].content : "", 1);
+        for (size_t i = 0; i < g_resume_tmp_n; i++) free(g_resume_tmp_msgs[i].content);
+        free(g_resume_tmp_msgs);
+        g_first_seq = g_resume_tmp_first;
+    }
+    g_resume_tmp_msgs = NULL;
+    g_resume_tmp_n = 0;
+    g_resume_tmp_first = -1;
+    g_resume_loading = 0;
+    g_dirty = 1;
+}
+
+static void chat_resume_last(void) {
+    if (strcmp(g_cfg.backend, "harness") != 0) return;
+    if (g_resume_loading) return;
+    g_resume_loading = 1;
+    g_resume_ready = 0;
+    SDL_Thread *th = SDL_CreateThread(chat_resume_thread_fn, "resume", NULL);
+    if (th) SDL_DetachThread(th);
+    else { g_resume_loading = 0; g_dirty = 1; }
 }
 
 /* ---------- 渲染缓存(60fps:消息预渲染成纹理,帧内只贴图) ---------- */
@@ -3779,6 +3812,7 @@ int app_frame(void) {
     tts_poll(); /* 每帧:取合成结果、向音频设备喂数据 */
     stt_poll(); /* 每帧:录音期间收集已释放的麦克风缓冲 */
     ws_apply_ready(); /* 每帧:取后台工作区加载结果 */
+    chat_resume_apply(); /* 每帧:取后台历史加载结果 */
 
     if (g_dirty) {
         if (g_screen == SCREEN_CHOICE) render_choice();
