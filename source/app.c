@@ -1003,6 +1003,8 @@ static void sb_build_rows(void) {
     g_sb_rows_n++;
 }
 
+static char g_sb_tmp_err[256] = {0};
+
 static int sb_thread_fn(void *arg) {
     (void)arg;
     char err[256] = {0};
@@ -1016,6 +1018,7 @@ static int sb_thread_fn(void *arg) {
     g_sb_tmp_wss_n = wn;
     g_sb_tmp_sess = s;
     g_sb_tmp_sess_n = sn;
+    snprintf(g_sb_tmp_err, sizeof(g_sb_tmp_err), "%s", err);
     g_sb_ready = 1;
     return 0;
 }
@@ -1056,6 +1059,7 @@ static void sb_apply_ready(void) {
         harness_sessions_free(g_sessions, g_sessions_n);
         g_sessions = g_sb_tmp_sess;
         g_sessions_n = g_sb_tmp_sess_n;
+        snprintf(g_sb_err, sizeof(g_sb_err), "%s", g_sb_tmp_err);
         sb_build_rows();
         g_sb_idx = 0;
         g_sb_loaded = 1;
@@ -1064,6 +1068,7 @@ static void sb_apply_ready(void) {
     g_sb_tmp_wss_n = 0;
     g_sb_tmp_sess = NULL;
     g_sb_tmp_sess_n = 0;
+    g_sb_tmp_err[0] = '\0';
     g_sb_loading = 0;
     g_sb_ready = 0;
     g_dirty = 1;
