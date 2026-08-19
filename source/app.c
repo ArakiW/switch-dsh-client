@@ -2868,41 +2868,66 @@ static void enter_ws_sessions(int ws_idx) {
     g_dirty = 1;
 }
 
-static void ws_sessions_load(void) {
-    render_ws_sessions();
-    g_dirty = 0;
+/* 工作区内会话异步加载 */
+static harness_session_t *g_wss_tmp_all = NULL;
+static size_t g_wss_tmp_all_n = 0;
+static volatile int g_wss_loading = 0;
+static volatile int g_wss_ready = 0;
+
+static int wss_thread_fn(void *arg) {
+    (void)arg;
     char err[256] = {0};
     harness_session_t *all = NULL;
     size_t all_n = 0;
-    if (harness_list_sessions(&g_cfg, &all, &all_n, err, sizeof(err)) != 0) {
-        snprintf(g_wss_err, sizeof(g_wss_err), "%s", err[0] ? err : "加载失败");
-    } else {
+    if (harness_list_sessions(&g_cfg, &all, &all_n, err, sizeof(err)) == 0) {
+        g_wss_tmp_all = all;
+        g_wss_tmp_all_n = all_n;
+    }
+    snprintf(g_wss_err, sizeof(g_wss_err), "%s", err);
+    g_wss_ready = 1;
+    return 0;
+}
+
+static void wss_apply_ready(void) {
+    if (!g_wss_loading || !g_wss_ready) return;
+    if (g_wss_tmp_all && g_wss_tmp_all_n > 0) {
         const char *path = (g_ws_sel >= 0 && (size_t)g_ws_sel < g_wss_n)
                                ? g_wss[g_ws_sel].path : NULL;
         size_t k = 0;
-        harness_session_t *sel = calloc(all_n ? all_n : 1, sizeof(*sel));
+        harness_session_t *sel = calloc(g_wss_tmp_all_n, sizeof(*sel));
         if (sel) {
-            for (size_t i = 0; i < all_n; i++) {
-                if (path && (!all[i].cwd || strcmp(all[i].cwd, path) != 0)) continue;
-                sel[k].session_id = all[i].session_id;
-                sel[k].title = all[i].title;
-                sel[k].cwd = all[i].cwd;
-                sel[k].running = all[i].running;
-                sel[k].updated_at = all[i].updated_at;
-                all[i].session_id = NULL;
-                all[i].title = NULL;
-                all[i].cwd = NULL;
+            for (size_t i = 0; i < g_wss_tmp_all_n; i++) {
+                if (path && (!g_wss_tmp_all[i].cwd ||
+                             strcmp(g_wss_tmp_all[i].cwd, path) != 0)) continue;
+                sel[k] = g_wss_tmp_all[i];
+                g_wss_tmp_all[i].session_id = NULL;
+                g_wss_tmp_all[i].title = NULL;
+                g_wss_tmp_all[i].cwd = NULL;
                 k++;
             }
+            harness_sessions_free(g_wss_sessions, g_wss_sessions_n);
             g_wss_sessions = sel;
             g_wss_sessions_n = k;
-        } else {
-            snprintf(g_wss_err, sizeof(g_wss_err), "内存不足");
         }
-        harness_sessions_free(all, all_n);
     }
+    harness_sessions_free(g_wss_tmp_all, g_wss_tmp_all_n);
+    g_wss_tmp_all = NULL;
+    g_wss_tmp_all_n = 0;
     g_wss_loaded = 1;
+    g_wss_loading = 0;
+    g_wss_ready = 0;
     g_dirty = 1;
+}
+
+/* 非阻塞:启动后台线程加载工作区内会话 */
+static void ws_sessions_load(void) {
+    if (g_wss_loading) return;
+    g_wss_err[0] = '\0';
+    g_wss_loading = 1;
+    g_wss_ready = 0;
+    SDL_Thread *th = SDL_CreateThread(wss_thread_fn, "wss", NULL);
+    if (th) SDL_DetachThread(th);
+    else { g_wss_loading = 0; g_wss_loaded = 1; g_dirty = 1; }
 }
 
 static void ws_sessions_pick(int row_idx) {
@@ -3726,14 +3751,18 @@ int app_frame(void) {
             else
                 store_active(g_buf_h, &g_bufn_h, &g_bufscroll_h, &g_buffirst_h);
 
-            const char *nb = strcmp(g_cfg.backend, "deepseek") == 0
-                                 ? "harness" : "deepseek";
+            const char *nb = strcmp(g_cfg.backend, "deepseek")
+                                 ? "deepseek" : "harness";
             free(g_cfg.backend);
             g_cfg.backend = strdup(nb);
             config_save(&g_cfg);
             snprintf(g_cur_model, sizeof(g_cur_model), "%s",
                      g_cfg.model ? g_cfg.model : "");
             printf("toggle backend -> %s\n", g_cfg.backend);
+
+            /* 重置加载状态:打断上一个后端的后台线程结果 */
+            g_sb_loading = 0;
+            g_sb_ready = 0;
 
             if (strcmp(nb, "harness") == 0) {
                 restore_active(g_buf_h, &g_bufn_h, g_bufscroll_h, g_buffirst_h);
@@ -3812,6 +3841,7 @@ int app_frame(void) {
     tts_poll(); /* 每帧:取合成结果、向音频设备喂数据 */
     stt_poll(); /* 每帧:录音期间收集已释放的麦克风缓冲 */
     ws_apply_ready(); /* 每帧:取后台工作区加载结果 */
+    wss_apply_ready(); /* 每帧:取后台工作区内会话加载结果 */
     chat_resume_apply(); /* 每帧:取后台历史加载结果 */
 
     if (g_dirty) {
