@@ -94,6 +94,21 @@ static int g_ws_idx = 0;
 static char g_ws_err[256];
 static int g_ws_confirm = -1; /* 删除确认:-1 = 无,>=0 = 该行待确认 */
 
+/* 工作区列表滚动 */
+static int g_ws_scroll = 0;
+
+/* 工作区内会话滚动 */
+static int g_wss_scroll = 0;
+
+/* 会话列表滚动 */
+static int g_sess_scroll = 0;
+
+/* 模型列表滚动 */
+static int g_models_scroll = 0;
+
+/* 搜索结果滚动 */
+static int g_search_scroll = 0;
+
 /* 工作区异步加载 */
 static harness_workspace_t *g_ws_tmp_wss = NULL;
 static size_t g_ws_tmp_wss_n = 0;
@@ -2333,6 +2348,7 @@ static void render_sessions(void) {
     }
 
     const int row_h = 64;
+    const int row_gap = 8;
     int y = HEADER_H + 16;
 
     if (!g_sess_loaded && !g_sess_err[0]) {
@@ -2354,55 +2370,72 @@ static void render_sessions(void) {
         return;
     }
 
+    /* 自动滚动:确保选中行始终可见 */
+    {
+        int total_rows = (int)g_sessions_n + 1;
+        int total_h = total_rows * (row_h + row_gap);
+        int vis_h = WIN_H - HEADER_H - 64 - 16;
+        int max_sc = total_h > vis_h ? total_h - vis_h : 0;
+        int sel_top = g_sess_idx * (row_h + row_gap);
+        if (sel_top < g_sess_scroll + 8) g_sess_scroll = sel_top - 8;
+        int sel_bot = (g_sess_idx + 1) * (row_h + row_gap);
+        if (sel_bot > g_sess_scroll + vis_h) g_sess_scroll = sel_bot - vis_h;
+        if (g_sess_scroll < 0) g_sess_scroll = 0;
+        if (g_sess_scroll > max_sc) g_sess_scroll = max_sc;
+    }
+
     /* 第一行:新建会话 */
     {
-        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
-        if (g_sess_idx == 0)
-            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                           (Sint16)(row.y + row.h), 10,
-                           COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
-        ts = TTF_RenderUTF8_Blended(g_font, "＋ 新建会话", COL_BRAND);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
+        int ry = y - g_sess_scroll;
+        if (ry + row_h > HEADER_H && ry < WIN_H - 64) {
+            SDL_Rect row = { 24, ry, WIN_W - 48, row_h };
+            if (g_sess_idx == 0)
+                roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                               (Sint16)(row.y + row.h), 10,
+                               COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+            ts = TTF_RenderUTF8_Blended(g_font, "＋ 新建会话", COL_BRAND);
+            if (ts) {
+                SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+                SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+                SDL_RenderCopy(g_ren, tt, NULL, &d);
+                SDL_DestroyTexture(tt);
+                SDL_FreeSurface(ts);
+            }
         }
-        y += row_h + 8;
+        y += row_h + row_gap;
     }
 
     for (size_t i = 0; i < g_sessions_n; i++) {
-        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
-        if ((int)i + 1 == g_sess_idx)
-            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                           (Sint16)(row.y + row.h), 10,
-                           COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
-        else
-            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                           (Sint16)(row.y + row.h), 10,
-                           COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
+        int ry = y - g_sess_scroll;
+        if (ry + row_h > HEADER_H && ry < WIN_H - 64) {
+            SDL_Rect row = { 24, ry, WIN_W - 48, row_h };
+            if ((int)i + 1 == g_sess_idx)
+                roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                               (Sint16)(row.y + row.h), 10,
+                               COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+            else
+                roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                               (Sint16)(row.y + row.h), 10,
+                               COL_SURF.r, COL_SURF.g, COL_SURF.b, 255);
 
-        /* 标题(像素级截断,右侧留状态栏空间) */
-        draw_trunc(g_font, g_sessions[i].title, COL_TEXT,
-                   row.x + 20, row.y + 10, WIN_W - 48 - 240);
+            draw_trunc(g_font, g_sessions[i].title, COL_TEXT,
+                       row.x + 20, row.y + 10, WIN_W - 48 - 240);
 
-        /* 右侧:状态 + 时间 */
-        char meta[64];
-        if (g_sessions[i].running) snprintf(meta, sizeof(meta), "运行中");
-        else fmt_time(g_sessions[i].updated_at, meta, sizeof(meta));
-        ts = TTF_RenderUTF8_Blended(g_font_hint, meta,
-                                    g_sessions[i].running ? COL_GREEN : COL_TEXT3);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + row.w - ts->w - 20, row.y + (row_h - ts->h) / 2,
-                           ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
+            char meta[64];
+            if (g_sessions[i].running) snprintf(meta, sizeof(meta), "运行中");
+            else fmt_time(g_sessions[i].updated_at, meta, sizeof(meta));
+            ts = TTF_RenderUTF8_Blended(g_font_hint, meta,
+                                        g_sessions[i].running ? COL_GREEN : COL_TEXT3);
+            if (ts) {
+                SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+                SDL_Rect d = { row.x + row.w - ts->w - 20, row.y + (row_h - ts->h) / 2,
+                               ts->w, ts->h };
+                SDL_RenderCopy(g_ren, tt, NULL, &d);
+                SDL_DestroyTexture(tt);
+                SDL_FreeSurface(ts);
+            }
         }
-        y += row_h + 8;
-        if (y > WIN_H - 100) break; /* 一屏装不下就截断 */
+        y += row_h + row_gap;
     }
 
     const char *hint = "方向键 选择    A 打开    Y 重命名    X 分叉    B 返回    + 退出";
@@ -2422,6 +2455,7 @@ static void enter_workspaces(int from_startup) {
     g_sess_from_startup = from_startup; /* 复用:B 返回 */
     g_ws_loaded = 0;
     g_ws_idx = 0;
+    g_ws_scroll = 0;
     g_ws_err[0] = '\0';
     g_ws_confirm = -1;
     harness_workspaces_free(g_wss, g_wss_n);
@@ -2645,6 +2679,7 @@ static void render_workspaces(void) {
     }
 
     const int row_h = 64;
+    const int row_gap = 8;
     int y = HEADER_H + 16;
 
     if (!g_ws_loaded && !g_ws_err[0]) {
@@ -2656,84 +2691,109 @@ static void render_workspaces(void) {
         return;
     }
 
+    /* 自动滚动:确保选中行始终可见 */
+    {
+        int total_rows = (int)g_wss_n + 4; /* 2固定 + N工作区 + 搜索 + 全部 */
+        int total_h = total_rows * (row_h + row_gap);
+        int vis_h = WIN_H - HEADER_H - 64 - 16;
+        int max_sc = total_h > vis_h ? total_h - vis_h : 0;
+        int sel_top = g_ws_idx * (row_h + row_gap);
+        if (sel_top < g_ws_scroll + 8) g_ws_scroll = sel_top - 8;
+        int sel_bot = (g_ws_idx + 1) * (row_h + row_gap);
+        if (sel_bot > g_ws_scroll + vis_h) g_ws_scroll = sel_bot - vis_h;
+        if (g_ws_scroll < 0) g_ws_scroll = 0;
+        if (g_ws_scroll > max_sc) g_ws_scroll = max_sc;
+    }
+
     /* 行 0:新建会话;行 1:新建工作区 */
     const char *rows0[2] = { "＋ 新建会话", "＋ 新建工作区(采纳已有目录)" };
     for (int i = 0; i < 2; i++) {
-        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
-        if (g_ws_idx == i)
-            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                           (Sint16)(row.y + row.h), 10,
-                           COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
-        ts = TTF_RenderUTF8_Blended(g_font, rows0[i], COL_BRAND);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
+        int ry = y - g_ws_scroll;
+        if (ry + row_h > HEADER_H && ry < WIN_H - 64) {
+            SDL_Rect row = { 24, ry, WIN_W - 48, row_h };
+            if (g_ws_idx == i)
+                roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                               (Sint16)(row.y + row.h), 10,
+                               COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+            ts = TTF_RenderUTF8_Blended(g_font, rows0[i], COL_BRAND);
+            if (ts) {
+                SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+                SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+                SDL_RenderCopy(g_ren, tt, NULL, &d);
+                SDL_DestroyTexture(tt);
+                SDL_FreeSurface(ts);
+            }
         }
-        y += row_h + 8;
+        y += row_h + row_gap;
     }
 
     for (size_t i = 0; i < g_wss_n; i++) {
-        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
-        int sel = (int)i + 2 == g_ws_idx;
-        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                       (Sint16)(row.y + row.h), 10,
-                       sel ? COL_SURF2.r : COL_SURF.r,
-                       sel ? COL_SURF2.g : COL_SURF.g,
-                       sel ? COL_SURF2.b : COL_SURF.b, 255);
+        int ry = y - g_ws_scroll;
+        if (ry + row_h > HEADER_H && ry < WIN_H - 64) {
+            SDL_Rect row = { 24, ry, WIN_W - 48, row_h };
+            int sel = (int)i + 2 == g_ws_idx;
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           sel ? COL_SURF2.r : COL_SURF.r,
+                           sel ? COL_SURF2.g : COL_SURF.g,
+                           sel ? COL_SURF2.b : COL_SURF.b, 255);
 
-        char label[200];
-        snprintf(label, sizeof(label), "%s", g_wss[i].title);
-        draw_trunc(g_font, label, COL_TEXT, row.x + 20, row.y + 10, WIN_W - 48 - 60);
+            char label[200];
+            snprintf(label, sizeof(label), "%s", g_wss[i].title);
+            draw_trunc(g_font, label, COL_TEXT, row.x + 20, row.y + 10, WIN_W - 48 - 60);
 
-        char meta[128];
-        snprintf(meta, sizeof(meta), "%zu 会话 · %s", g_wss[i].session_count,
-                 g_wss[i].path ? g_wss[i].path : "");
-        draw_trunc(g_font_hint, meta, COL_TEXT3,
-                   row.x + 20, row.y + row_h - TTF_FontHeight(g_font_hint) - 8,
-                   WIN_W - 48 - 60);
-        y += row_h + 8;
-        if (y > WIN_H - 140) break;
+            char meta[128];
+            snprintf(meta, sizeof(meta), "%zu 会话 · %s", g_wss[i].session_count,
+                     g_wss[i].path ? g_wss[i].path : "");
+            draw_trunc(g_font_hint, meta, COL_TEXT3,
+                       row.x + 20, row.y + row_h - TTF_FontHeight(g_font_hint) - 8,
+                       WIN_W - 48 - 60);
+        }
+        y += row_h + row_gap;
     }
 
     /* 搜索会话 */
     {
-        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
-        int sel = g_ws_idx == (int)g_wss_n + 2;
-        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                       (Sint16)(row.y + row.h), 10,
-                       sel ? COL_SURF2.r : COL_SURF.r,
-                       sel ? COL_SURF2.g : COL_SURF.g,
-                       sel ? COL_SURF2.b : COL_SURF.b, 255);
-        ts = TTF_RenderUTF8_Blended(g_font, "搜索会话", COL_TEXT);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
+        int ry = y - g_ws_scroll;
+        if (ry + row_h > HEADER_H && ry < WIN_H - 64) {
+            SDL_Rect row = { 24, ry, WIN_W - 48, row_h };
+            int sel = g_ws_idx == (int)g_wss_n + 2;
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           sel ? COL_SURF2.r : COL_SURF.r,
+                           sel ? COL_SURF2.g : COL_SURF.g,
+                           sel ? COL_SURF2.b : COL_SURF.b, 255);
+            ts = TTF_RenderUTF8_Blended(g_font, "搜索会话", COL_TEXT);
+            if (ts) {
+                SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+                SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+                SDL_RenderCopy(g_ren, tt, NULL, &d);
+                SDL_DestroyTexture(tt);
+                SDL_FreeSurface(ts);
+            }
         }
-        y += row_h + 8;
+        y += row_h + row_gap;
     }
 
     /* 全部会话(平铺) */
     {
-        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
-        int sel = g_ws_idx == (int)g_wss_n + 3;
-        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                       (Sint16)(row.y + row.h), 10,
-                       sel ? COL_SURF2.r : COL_SURF.r,
-                       sel ? COL_SURF2.g : COL_SURF.g,
-                       sel ? COL_SURF2.b : COL_SURF.b, 255);
-        ts = TTF_RenderUTF8_Blended(g_font, "全部会话(平铺)", COL_TEXT);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
+        int ry = y - g_ws_scroll;
+        if (ry + row_h > HEADER_H && ry < WIN_H - 64) {
+            SDL_Rect row = { 24, ry, WIN_W - 48, row_h };
+            int sel = g_ws_idx == (int)g_wss_n + 3;
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           sel ? COL_SURF2.r : COL_SURF.r,
+                           sel ? COL_SURF2.g : COL_SURF.g,
+                           sel ? COL_SURF2.b : COL_SURF.b, 255);
+            ts = TTF_RenderUTF8_Blended(g_font, "全部会话(平铺)", COL_TEXT);
+            if (ts) {
+                SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+                SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+                SDL_RenderCopy(g_ren, tt, NULL, &d);
+                SDL_DestroyTexture(tt);
+                SDL_FreeSurface(ts);
+            }
         }
     }
 
@@ -2766,6 +2826,7 @@ static void enter_ws_sessions(int ws_idx) {
     g_ws_sel = ws_idx;
     g_wss_loaded = 0;
     g_wss_idx = 0;
+    g_wss_scroll = 0;
     g_wss_err[0] = '\0';
     harness_sessions_free(g_wss_sessions, g_wss_sessions_n);
     g_wss_sessions = NULL;
@@ -2948,6 +3009,7 @@ static void render_ws_sessions(void) {
     }
 
     const int row_h = 64;
+    const int row_gap = 8;
     int y = HEADER_H + 16;
 
     if (!g_wss_loaded && !g_wss_err[0]) {
@@ -2959,48 +3021,67 @@ static void render_ws_sessions(void) {
         return;
     }
 
+    /* 自动滚动:确保选中行始终可见 */
     {
-        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
-        if (g_wss_idx == 0)
-            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                           (Sint16)(row.y + row.h), 10,
-                           COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
-        ts = TTF_RenderUTF8_Blended(g_font, "＋ 在此工作区新建会话", COL_BRAND);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
+        int total_rows = (int)g_wss_sessions_n + 1; /* 1固定 + N会话 */
+        int total_h = total_rows * (row_h + row_gap);
+        int vis_h = WIN_H - HEADER_H - 64 - 16;
+        int max_sc = total_h > vis_h ? total_h - vis_h : 0;
+        int sel_top = g_wss_idx * (row_h + row_gap);
+        if (sel_top < g_wss_scroll + 8) g_wss_scroll = sel_top - 8;
+        int sel_bot = (g_wss_idx + 1) * (row_h + row_gap);
+        if (sel_bot > g_wss_scroll + vis_h) g_wss_scroll = sel_bot - vis_h;
+        if (g_wss_scroll < 0) g_wss_scroll = 0;
+        if (g_wss_scroll > max_sc) g_wss_scroll = max_sc;
+    }
+
+    {
+        int ry = y - g_wss_scroll;
+        if (ry + row_h > HEADER_H && ry < WIN_H - 64) {
+            SDL_Rect row = { 24, ry, WIN_W - 48, row_h };
+            if (g_wss_idx == 0)
+                roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                               (Sint16)(row.y + row.h), 10,
+                               COL_SURF2.r, COL_SURF2.g, COL_SURF2.b, 255);
+            ts = TTF_RenderUTF8_Blended(g_font, "＋ 在此工作区新建会话", COL_BRAND);
+            if (ts) {
+                SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+                SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+                SDL_RenderCopy(g_ren, tt, NULL, &d);
+                SDL_DestroyTexture(tt);
+                SDL_FreeSurface(ts);
+            }
         }
-        y += row_h + 8;
+        y += row_h + row_gap;
     }
 
     for (size_t i = 0; i < g_wss_sessions_n; i++) {
-        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
-        int sel = (int)i + 1 == g_wss_idx;
-        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                       (Sint16)(row.y + row.h), 10,
-                       sel ? COL_SURF2.r : COL_SURF.r,
-                       sel ? COL_SURF2.g : COL_SURF.g,
-                       sel ? COL_SURF2.b : COL_SURF.b, 255);
-        draw_trunc(g_font, g_wss_sessions[i].title, COL_TEXT,
-                   row.x + 20, row.y + 10, WIN_W - 48 - 240);
-        char meta[64];
-        if (g_wss_sessions[i].running) snprintf(meta, sizeof(meta), "运行中");
-        else fmt_time(g_wss_sessions[i].updated_at, meta, sizeof(meta));
-        ts = TTF_RenderUTF8_Blended(g_font_hint, meta,
-                                    g_wss_sessions[i].running ? COL_GREEN : COL_TEXT3);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + row.w - ts->w - 20, row.y + (row_h - ts->h) / 2,
-                           ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
+        int ry = y - g_wss_scroll;
+        if (ry + row_h > HEADER_H && ry < WIN_H - 64) {
+            SDL_Rect row = { 24, ry, WIN_W - 48, row_h };
+            int sel = (int)i + 1 == g_wss_idx;
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           sel ? COL_SURF2.r : COL_SURF.r,
+                           sel ? COL_SURF2.g : COL_SURF.g,
+                           sel ? COL_SURF2.b : COL_SURF.b, 255);
+            draw_trunc(g_font, g_wss_sessions[i].title, COL_TEXT,
+                       row.x + 20, row.y + 10, WIN_W - 48 - 240);
+            char meta[64];
+            if (g_wss_sessions[i].running) snprintf(meta, sizeof(meta), "运行中");
+            else fmt_time(g_wss_sessions[i].updated_at, meta, sizeof(meta));
+            ts = TTF_RenderUTF8_Blended(g_font_hint, meta,
+                                        g_wss_sessions[i].running ? COL_GREEN : COL_TEXT3);
+            if (ts) {
+                SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+                SDL_Rect d = { row.x + row.w - ts->w - 20, row.y + (row_h - ts->h) / 2,
+                               ts->w, ts->h };
+                SDL_RenderCopy(g_ren, tt, NULL, &d);
+                SDL_DestroyTexture(tt);
+                SDL_FreeSurface(ts);
+            }
         }
-        y += row_h + 8;
-        if (y > WIN_H - 100) break;
+        y += row_h + row_gap;
     }
 
     const char *hint = "方向键 选择    A 打开    Y 重命名    X 分叉    B 返回工作区    + 退出";
@@ -3132,6 +3213,7 @@ static void render_models(void) {
                (HEADER_H - TTF_FontHeight(g_font_hint)) / 2 + 2, WIN_W - 200 - 40);
 
     const int row_h = 64;
+    const int row_gap = 8;
     int y = HEADER_H + 16;
 
     if (!g_models_loaded && !g_models_err[0]) {
@@ -3143,67 +3225,86 @@ static void render_models(void) {
         return;
     }
 
-    for (size_t i = 0; i < g_models_n; i++) {
-        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
-        int sel = (int)i == g_model_idx;
-        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                       (Sint16)(row.y + row.h), 10,
-                       sel ? COL_SURF2.r : COL_SURF.r,
-                       sel ? COL_SURF2.g : COL_SURF.g,
-                       sel ? COL_SURF2.b : COL_SURF.b, 255);
-        if (strcmp(g_models[i].id, g_cur_model) == 0)
-            roundedRectangleRGBA(g_ren, (Sint16)row.x, (Sint16)row.y,
-                                 (Sint16)(row.x + row.w), (Sint16)(row.y + row.h), 10,
-                                 COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
+    /* 自动滚动:确保选中行始终可见 */
+    {
+        int total_rows = (int)g_models_n + 2; /* N模型 + 2推理强度 */
+        int total_h = total_rows * (row_h + row_gap);
+        int vis_h = WIN_H - HEADER_H - 64 - 16;
+        int max_sc = total_h > vis_h ? total_h - vis_h : 0;
+        int sel_top = g_model_idx * (row_h + row_gap);
+        if (sel_top < g_models_scroll + 8) g_models_scroll = sel_top - 8;
+        int sel_bot = (g_model_idx + 1) * (row_h + row_gap);
+        if (sel_bot > g_models_scroll + vis_h) g_models_scroll = sel_bot - vis_h;
+        if (g_models_scroll < 0) g_models_scroll = 0;
+        if (g_models_scroll > max_sc) g_models_scroll = max_sc;
+    }
 
-        char label[200];
-        snprintf(label, sizeof(label), "%s%s", g_models[i].name,
-                 strcmp(g_models[i].id, g_cur_model) == 0 ? " (当前)" : "");
-        draw_trunc(g_font, label,
-                   strcmp(g_models[i].id, g_cur_model) == 0 ? COL_BRAND : COL_TEXT,
-                   row.x + 20, row.y + 10, WIN_W - 48 - 60);
-        char meta[160];
-        if (g_models[i].provider && g_models[i].provider[0])
-            snprintf(meta, sizeof(meta), "%s · %s", g_models[i].provider, g_models[i].id);
-        else
-            snprintf(meta, sizeof(meta), "%s", g_models[i].id);
-        draw_trunc(g_font_hint, meta, COL_TEXT3,
-                   row.x + 20, row.y + row_h - TTF_FontHeight(g_font_hint) - 8,
-                   WIN_W - 48 - 60);
-        y += row_h + 8;
-        if (y > WIN_H - 100) break;
+    for (size_t i = 0; i < g_models_n; i++) {
+        int ry = y - g_models_scroll;
+        if (ry + row_h > HEADER_H && ry < WIN_H - 64) {
+            SDL_Rect row = { 24, ry, WIN_W - 48, row_h };
+            int sel = (int)i == g_model_idx;
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           sel ? COL_SURF2.r : COL_SURF.r,
+                           sel ? COL_SURF2.g : COL_SURF.g,
+                           sel ? COL_SURF2.b : COL_SURF.b, 255);
+            if (strcmp(g_models[i].id, g_cur_model) == 0)
+                roundedRectangleRGBA(g_ren, (Sint16)row.x, (Sint16)row.y,
+                                     (Sint16)(row.x + row.w), (Sint16)(row.y + row.h), 10,
+                                     COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
+
+            char label[200];
+            snprintf(label, sizeof(label), "%s%s", g_models[i].name,
+                     strcmp(g_models[i].id, g_cur_model) == 0 ? " (当前)" : "");
+            draw_trunc(g_font, label,
+                       strcmp(g_models[i].id, g_cur_model) == 0 ? COL_BRAND : COL_TEXT,
+                       row.x + 20, row.y + 10, WIN_W - 48 - 60);
+            char meta[160];
+            if (g_models[i].provider && g_models[i].provider[0])
+                snprintf(meta, sizeof(meta), "%s · %s", g_models[i].provider, g_models[i].id);
+            else
+                snprintf(meta, sizeof(meta), "%s", g_models[i].id);
+            draw_trunc(g_font_hint, meta, COL_TEXT3,
+                       row.x + 20, row.y + row_h - TTF_FontHeight(g_font_hint) - 8,
+                       WIN_W - 48 - 60);
+        }
+        y += row_h + row_gap;
     }
 
     /* 推理强度两行 */
     for (int e = 0; e < 2; e++) {
-        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
-        int idx = (int)g_models_n + e;
-        int sel = g_model_idx == idx;
-        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                       (Sint16)(row.y + row.h), 10,
-                       sel ? COL_SURF2.r : COL_SURF.r,
-                       sel ? COL_SURF2.g : COL_SURF.g,
-                       sel ? COL_SURF2.b : COL_SURF.b, 255);
-        const char *eff = e == 0 ? "low" : "high";
-        int is_cur = strcmp(g_cur_effort, eff) == 0;
-        if (is_cur)
-            roundedRectangleRGBA(g_ren, (Sint16)row.x, (Sint16)row.y,
-                                 (Sint16)(row.x + row.w), (Sint16)(row.y + row.h), 10,
-                                 COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
-        char label[200];
-        snprintf(label, sizeof(label), "推理强度:%s(%s)%s",
-                 e == 0 ? "低" : "高",
-                 e == 0 ? "少思考,响应快" : "多思考,更深入",
-                 is_cur ? " (当前)" : "");
-        ts = TTF_RenderUTF8_Blended(g_font, label, is_cur ? COL_BRAND : COL_TEXT);
-        if (ts) {
-            SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
-            SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
-            SDL_RenderCopy(g_ren, tt, NULL, &d);
-            SDL_DestroyTexture(tt);
-            SDL_FreeSurface(ts);
+        int ry = y - g_models_scroll;
+        if (ry + row_h > HEADER_H && ry < WIN_H - 64) {
+            SDL_Rect row = { 24, ry, WIN_W - 48, row_h };
+            int idx = (int)g_models_n + e;
+            int sel = g_model_idx == idx;
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           sel ? COL_SURF2.r : COL_SURF.r,
+                           sel ? COL_SURF2.g : COL_SURF.g,
+                           sel ? COL_SURF2.b : COL_SURF.b, 255);
+            const char *eff = e == 0 ? "low" : "high";
+            int is_cur = strcmp(g_cur_effort, eff) == 0;
+            if (is_cur)
+                roundedRectangleRGBA(g_ren, (Sint16)row.x, (Sint16)row.y,
+                                     (Sint16)(row.x + row.w), (Sint16)(row.y + row.h), 10,
+                                     COL_BRAND.r, COL_BRAND.g, COL_BRAND.b, 255);
+            char label[200];
+            snprintf(label, sizeof(label), "推理强度:%s(%s)%s",
+                     e == 0 ? "低" : "高",
+                     e == 0 ? "少思考,响应快" : "多思考,更深入",
+                     is_cur ? " (当前)" : "");
+            ts = TTF_RenderUTF8_Blended(g_font, label, is_cur ? COL_BRAND : COL_TEXT);
+            if (ts) {
+                SDL_Texture *tt = SDL_CreateTextureFromSurface(g_ren, ts);
+                SDL_Rect d = { row.x + 20, row.y + (row_h - ts->h) / 2, ts->w, ts->h };
+                SDL_RenderCopy(g_ren, tt, NULL, &d);
+                SDL_DestroyTexture(tt);
+                SDL_FreeSurface(ts);
+            }
         }
-        y += row_h + 8;
+        y += row_h + row_gap;
     }
 
     const char *hint = "方向键 选择    A 应用    B 返回    + 退出";
@@ -3326,6 +3427,7 @@ static void render_search(void) {
                (HEADER_H - TTF_FontHeight(g_font_title)) / 2, WIN_W - 48 - 60);
 
     const int row_h = 64;
+    const int row_gap = 8;
     int y = HEADER_H + 16;
 
     if (!g_search_loaded && !g_search_err[0]) {
@@ -3341,21 +3443,37 @@ static void render_search(void) {
         return;
     }
 
+    /* 自动滚动:确保选中行始终可见 */
+    {
+        int total_rows = (int)g_search_n;
+        int total_h = total_rows * (row_h + row_gap);
+        int vis_h = WIN_H - HEADER_H - 64 - 16;
+        int max_sc = total_h > vis_h ? total_h - vis_h : 0;
+        int sel_top = g_search_idx * (row_h + row_gap);
+        if (sel_top < g_search_scroll + 8) g_search_scroll = sel_top - 8;
+        int sel_bot = (g_search_idx + 1) * (row_h + row_gap);
+        if (sel_bot > g_search_scroll + vis_h) g_search_scroll = sel_bot - vis_h;
+        if (g_search_scroll < 0) g_search_scroll = 0;
+        if (g_search_scroll > max_sc) g_search_scroll = max_sc;
+    }
+
     for (size_t i = 0; i < g_search_n; i++) {
-        SDL_Rect row = { 24, y, WIN_W - 48, row_h };
-        int sel = (int)i == g_search_idx;
-        roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
-                       (Sint16)(row.y + row.h), 10,
-                       sel ? COL_SURF2.r : COL_SURF.r,
-                       sel ? COL_SURF2.g : COL_SURF.g,
-                       sel ? COL_SURF2.b : COL_SURF.b, 255);
-        char text[512];
-        snprintf(text, sizeof(text), "%s", g_search[i].snippet);
-        draw_trunc(g_font, text, COL_TEXT,
-                   row.x + 20, row.y + (row_h - TTF_FontHeight(g_font)) / 2,
-                   WIN_W - 48 - 60);
-        y += row_h + 8;
-        if (y > WIN_H - 100) break;
+        int ry = y - g_search_scroll;
+        if (ry + row_h > HEADER_H && ry < WIN_H - 64) {
+            SDL_Rect row = { 24, ry, WIN_W - 48, row_h };
+            int sel = (int)i == g_search_idx;
+            roundedBoxRGBA(g_ren, (Sint16)row.x, (Sint16)row.y, (Sint16)(row.x + row.w),
+                           (Sint16)(row.y + row.h), 10,
+                           sel ? COL_SURF2.r : COL_SURF.r,
+                           sel ? COL_SURF2.g : COL_SURF.g,
+                           sel ? COL_SURF2.b : COL_SURF.b, 255);
+            char text[512];
+            snprintf(text, sizeof(text), "%s", g_search[i].snippet);
+            draw_trunc(g_font, text, COL_TEXT,
+                       row.x + 20, row.y + (row_h - TTF_FontHeight(g_font)) / 2,
+                       WIN_W - 48 - 60);
+        }
+        y += row_h + row_gap;
     }
 
     const char *hint = "方向键 选择    A 打开    B 返回工作区    + 退出";
