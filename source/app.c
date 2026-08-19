@@ -2475,7 +2475,7 @@ static int ws_thread_fn(void *arg) {
     g_ws_tmp_wss_n = wn;
     snprintf(g_ws_err, sizeof(g_ws_err), "%s", err);
     g_ws_ready = 1;
-    g_ws_loading = 0;
+    /* 注意:不要在这里设 g_ws_loading = 0,由主线程 ws_apply_ready 负责 */
     return 0;
 }
 
