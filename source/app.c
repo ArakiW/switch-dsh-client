@@ -2238,16 +2238,48 @@ static void fmt_time(long long epoch_ms, char *out, size_t outsz) {
              tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
 }
 
+/* 会话列表异步加载 */
+static harness_session_t *g_sess_tmp = NULL;
+static size_t g_sess_tmp_n = 0;
+static volatile int g_sess_loading_async = 0;
+static volatile int g_sess_ready = 0;
+
+static int sess_thread_fn(void *arg) {
+    (void)arg;
+    char err[256] = {0};
+    harness_session_t *s = NULL;
+    size_t sn = 0;
+    harness_list_sessions(&g_cfg, &s, &sn, err, sizeof(err));
+    g_sess_tmp = s;
+    g_sess_tmp_n = sn;
+    snprintf(g_sess_err, sizeof(g_sess_err), "%s", err);
+    g_sess_ready = 1;
+    return 0;
+}
+
+static void sess_apply_ready(void) {
+    if (!g_sess_loading_async || !g_sess_ready) return;
+    harness_sessions_free(g_sessions, g_sessions_n);
+    g_sessions = g_sess_tmp;
+    g_sessions_n = g_sess_tmp_n;
+    g_sess_tmp = NULL;
+    g_sess_tmp_n = 0;
+    g_sess_loaded = 1;
+    g_sess_loading_async = 0;
+    g_sess_ready = 0;
+    g_dirty = 1;
+}
+
 static void sessions_load(void) {
     render_sessions(); /* 先渲染加载态 */
     g_dirty = 0;
-    char err[256] = {0};
-    if (harness_list_sessions(&g_cfg, &g_sessions, &g_sessions_n,
-                              err, sizeof(err)) != 0) {
-        snprintf(g_sess_err, sizeof(g_sess_err), "%s", err[0] ? err : "加载失败");
-    }
-    g_sess_loaded = 1;
-    g_dirty = 1;
+    if (g_sess_loading_async) return;
+    g_sess_err[0] = '\0';
+    g_sess_loading_async = 1;
+    g_sess_ready = 0;
+    SDL_Thread *th = SDL_CreateThread(sess_thread_fn, "sess", NULL);
+    if (th) SDL_DetachThread(th);
+    else { g_sess_loading_async = 0; g_sess_loaded = 1; g_dirty = 1; }
 }
 
 static void sessions_pick(void) {
@@ -3171,27 +3203,62 @@ static void enter_models(void) {
     g_dirty = 1;
 }
 
-static void models_load(void) {
-    render_models();
-    g_dirty = 0;
+/* 模型列表异步加载 */
+static model_option_t *g_models_tmp = NULL;
+static size_t g_models_tmp_n = 0;
+static char g_models_tmp_cur[128] = {0};
+static char g_models_tmp_effort[32] = {0};
+static volatile int g_models_loading_async = 0;
+static volatile int g_models_ready = 0;
+
+static int models_thread_fn(void *arg) {
+    (void)arg;
     char err[256] = {0};
-    if (backend_list_models(&g_cfg, &g_models, &g_models_n,
-                            g_cur_model, sizeof(g_cur_model),
-                            g_cur_effort, sizeof(g_cur_effort),
-                            err, sizeof(err)) != 0) {
-        snprintf(g_models_err, sizeof(g_models_err), "%s", err[0] ? err : "加载失败");
-    } else {
-        /* 高亮当前模型 */
-        g_model_idx = 0;
-        for (size_t i = 0; i < g_models_n; i++) {
-            if (strcmp(g_models[i].id, g_cur_model) == 0) {
-                g_model_idx = (int)i;
-                break;
-            }
+    model_option_t *m = NULL;
+    size_t mn = 0;
+    backend_list_models(&g_cfg, &m, &mn, g_models_tmp_cur, sizeof(g_models_tmp_cur),
+                        g_models_tmp_effort, sizeof(g_models_tmp_effort),
+                        err, sizeof(err));
+    g_models_tmp = m;
+    g_models_tmp_n = mn;
+    snprintf(g_models_err, sizeof(g_models_err), "%s", err);
+    g_models_ready = 1;
+    return 0;
+}
+
+static void models_apply_ready(void) {
+    if (!g_models_loading_async || !g_models_ready) return;
+    free(g_models);
+    g_models = g_models_tmp;
+    g_models_n = g_models_tmp_n;
+    g_models_tmp = NULL;
+    g_models_tmp_n = 0;
+    snprintf(g_cur_model, sizeof(g_cur_model), "%s", g_models_tmp_cur);
+    snprintf(g_cur_effort, sizeof(g_cur_effort), "%s", g_models_tmp_effort);
+    g_model_idx = 0;
+    for (size_t i = 0; i < g_models_n; i++) {
+        if (strcmp(g_models[i].id, g_cur_model) == 0) {
+            g_model_idx = (int)i; break;
         }
     }
     g_models_loaded = 1;
+    g_models_loading_async = 0;
+    g_models_ready = 0;
     g_dirty = 1;
+}
+
+static void models_load(void) {
+    render_models();
+    g_dirty = 0;
+    if (g_models_loading_async) return;
+    g_models_err[0] = '\0';
+    snprintf(g_models_tmp_cur, sizeof(g_models_tmp_cur), "%s", g_cur_model);
+    snprintf(g_models_tmp_effort, sizeof(g_models_tmp_effort), "%s", g_cur_effort);
+    g_models_loading_async = 1;
+    g_models_ready = 0;
+    SDL_Thread *th = SDL_CreateThread(models_thread_fn, "models", NULL);
+    if (th) SDL_DetachThread(th);
+    else { g_models_loading_async = 0; g_models_loaded = 1; g_dirty = 1; }
 }
 
 static void models_input(u64 kDown) {
@@ -3406,15 +3473,50 @@ static void search_start(void) {
     search_load();
 }
 
+/* 搜索结果异步加载 */
+static harness_search_hit_t *g_search_tmp = NULL;
+static size_t g_search_tmp_n = 0;
+static char g_search_tmp_q[512] = {0};
+static volatile int g_search_loading_async = 0;
+static volatile int g_search_ready = 0;
+
+static int search_thread_fn(void *arg) {
+    (void)arg;
+    char err[256] = {0};
+    harness_search_hit_t *hits = NULL;
+    size_t hn = 0;
+    harness_search_sessions(&g_cfg, g_search_tmp_q, &hits, &hn, err, sizeof(err));
+    g_search_tmp = hits;
+    g_search_tmp_n = hn;
+    snprintf(g_search_err, sizeof(g_search_err), "%s", err);
+    g_search_ready = 1;
+    return 0;
+}
+
+static void search_apply_ready(void) {
+    if (!g_search_loading_async || !g_search_ready) return;
+    harness_search_free(g_search, g_search_n);
+    g_search = g_search_tmp;
+    g_search_n = g_search_tmp_n;
+    g_search_tmp = NULL;
+    g_search_tmp_n = 0;
+    g_search_loaded = 1;
+    g_search_loading_async = 0;
+    g_search_ready = 0;
+    g_dirty = 1;
+}
+
 static void search_load(void) {
     render_search();
     g_dirty = 0;
-    char err[256] = {0};
-    if (harness_search_sessions(&g_cfg, g_last_query, &g_search, &g_search_n,
-                                err, sizeof(err)) != 0)
-        snprintf(g_search_err, sizeof(g_search_err), "%s", err[0] ? err : "搜索失败");
-    g_search_loaded = 1;
-    g_dirty = 1;
+    if (g_search_loading_async) return;
+    g_search_err[0] = '\0';
+    snprintf(g_search_tmp_q, sizeof(g_search_tmp_q), "%s", g_last_query);
+    g_search_loading_async = 1;
+    g_search_ready = 0;
+    SDL_Thread *th = SDL_CreateThread(search_thread_fn, "srch", NULL);
+    if (th) SDL_DetachThread(th);
+    else { g_search_loading_async = 0; g_search_loaded = 1; g_dirty = 1; }
 }
 
 static void search_pick(int idx) {
@@ -3847,6 +3949,9 @@ int app_frame(void) {
     stt_poll(); /* 每帧:录音期间收集已释放的麦克风缓冲 */
     ws_apply_ready(); /* 每帧:取后台工作区加载结果 */
     wss_apply_ready(); /* 每帧:取后台工作区内会话加载结果 */
+    sess_apply_ready(); /* 每帧:取后台会话列表加载结果 */
+    search_apply_ready(); /* 每帧:取后台搜索结果 */
+    models_apply_ready(); /* 每帧:取后台模型列表 */
     chat_resume_apply(); /* 每帧:取后台历史加载结果 */
 
     if (g_dirty) {
